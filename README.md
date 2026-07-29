@@ -30,7 +30,7 @@ fits together and reports:
 
 | Output | Meaning |
 |---|---|
-| **Joint rotation** | How far each connection turned from its wild-type angle, graded `OK` (<15°), `HARD` (15–35°), `FORBIDDEN` (>35°) |
+| **Joint rotation** | How far each connection turned from its wild-type angle, graded `OK` / `HARD` / `FORBIDDEN` against per-joint limits (see below) |
 | **Bond load** | Which connection carries the most strain, i.e. which would rupture first |
 | **Buckling** | Which segments had to bow because space became too tight (segments never stretch) |
 | **Clashes** | Microtubules overlapping in space — physically impossible |
@@ -50,6 +50,36 @@ fits together and reports:
   a result rather than an assumption. Strength order (strong → weak):
   linker–A-tubule, linker–C-tubule, pinhead–triplet, pinhead–spoke,
   base–pinhead, base–linker.
+- **Joints have individual tolerances.** A rotation means different things
+  at different connections, so each is graded against its own limits.
+  Contacts on microtubules are tightest — they grip a rigid, ordered
+  lattice at defined protofilaments — while the triplet axis and base are
+  most permissive, being composites rather than single interfaces. The
+  SAS-6 spoke is deliberately *not* treated as unusually soft: many SAS-6
+  rings stack along the centriole axis, which stiffens what looks floppy
+  in a single 2D slice.
+
+  | Joint / contact | OK | HARD | FORBIDDEN |
+  |---|---|---|---|
+  | Linker ↔ A-tubule | ≤ 8° | 8–20° | > 20° |
+  | Linker ↔ C-tubule | ≤ 8° | 8–20° | > 20° |
+  | Pinhead ↔ A-tubule | ≤ 10° | 10–22° | > 22° |
+  | Spoke vs radial | ≤ 15° | 15–35° | > 35° |
+  | Pinhead vs spoke | ≤ 15° | 15–30° | > 30° |
+  | Triplet axis vs spoke | ≤ 20° | 20–40° | > 40° |
+  | Base vs spoke | ≤ 20° | 20–40° | > 40° |
+
+  These values are reasoned heuristics, not measurements — no
+  sub-tomogram angular variance was available to calibrate them. The rank
+  ordering is defensible; the absolute numbers are not. Use
+  `band_sensitivity()` to confirm a conclusion survives the bands being
+  scaled, and only report conclusions that do:
+
+  ```python
+  from centriole_kinematic import Geometry, band_sensitivity
+  band_sensitivity(Geometry(N_cw=8, N_mt=9))   # scales all bands 0.5x - 2x
+  ```
+
 - **Hub size follows symmetry.** SAS-6 heads oligomerise at a fixed
   head-to-head spacing, so hub radius = `d / (2·sin(π/N))`. An 8-fold
   cartwheel is automatically tighter than a 9-fold one.

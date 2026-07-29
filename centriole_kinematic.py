@@ -35,9 +35,14 @@ triplets are paired one-to-one by optimal angular assignment, so with
 
 **Mechanics.** Segments never stretch; they may *buckle* (bow, shortening
 the end-to-end chord at fixed contour length), bounded to shorten only.
-Joint rotations are penalised in **bands**: up to `ANGLE_FREE` deg is
-nearly free, `ANGLE_FREE`-`ANGLE_HARD` is hard, and beyond `ANGLE_HARD`
-is heavily penalised.
+Joint rotations are penalised in **per-joint bands** (see
+:data:`JOINT_BANDS`): within the OK limit rotation is nearly free, between
+OK and HARD it is costly, beyond HARD it is heavily penalised. Contacts on
+microtubules are the tightest, because they grip a rigid ordered lattice;
+the triplet axis and base are the most permissive. Band values are
+reasoned heuristics rather than measurements, so
+:func:`band_sensitivity` is provided to check whether any conclusion
+actually depends on them.
 
 **Bonds and rupture.** Every connection is a spring whose stiffness is its
 strength (see :data:`BOND_STRENGTH`), so weak bonds yield first and the
@@ -83,9 +88,36 @@ BOND_STRENGTH = {
     "base-linker": 0.25,  # (weakest)
 }
 
-#: Joint-rotation penalty bands (degrees).
-ANGLE_FREE = 15.0    # within this, essentially free
-ANGLE_HARD = 35.0    # beyond this, heavily penalised
+#: Per-joint rotation bands, as (OK-limit, HARD-limit) in degrees. Beyond
+#: the HARD limit a rotation is treated as forbidden.
+#:
+#: The *ordering* here is defensible; the absolute values are reasoned
+#: heuristics, not measurements (no sub-tomogram angular variance is
+#: available to calibrate against). Use :func:`band_sensitivity` to check
+#: whether a conclusion actually depends on them.
+#:
+#: Rationale:
+#:  - contacts on microtubules are tightest: they grip a rigid, ordered
+#:    lattice at defined protofilaments;
+#:  - the SAS-6 spoke is NOT treated as unusually soft -- in 3D many SAS-6
+#:    rings stack, which stiffens what looks floppy in a single 2D slice;
+#:  - the triplet axis and base are the most permissive: neither is a
+#:    single interface, and both are implicated in iris-like motion.
+JOINT_BANDS = {
+    "linker-A": (8.0, 20.0),
+    "linker-C": (8.0, 20.0),
+    "pinhead-A": (10.0, 22.0),
+    "spoke": (15.0, 35.0),
+    "pinhead": (15.0, 30.0),
+    "triplet": (20.0, 40.0),
+    "base": (20.0, 40.0),
+}
+
+#: Rest orientation of each strand within the body frame of the tubule it
+#: grips (degrees), taken from the wild-type solution of the measured
+#: geometry. Deviation from these is what the contact bands penalise.
+CONTACT_REST = {"linker-A": -13.199, "linker-C": -53.199, "pinhead-A": 77.394}
+
 W_FREE, W_HARD, W_FORBID = 1.0, 5.0, 30.0
 
 PF1_ANCHOR = {"A": -43.131, "B": 123.036, "C": 110.525}
@@ -105,17 +137,27 @@ def _wrap(a):
     return (a + 180.0) % 360.0 - 180.0
 
 
-def angle_penalty(dev_deg):
+def angle_penalty(dev_deg, joint="spoke", bands=None):
     """Piecewise-linear banded penalty on a joint deviation (degrees).
 
     Continuous, so the optimiser stays well behaved, but its slope steps
-    up at ANGLE_FREE and again at ANGLE_HARD.
+    up at that joint's OK limit and again at its HARD limit.
     """
+    free_lim, hard_lim = (bands or JOINT_BANDS)[joint]
     a = np.abs(dev_deg)
-    free = np.minimum(a, ANGLE_FREE)
-    hard = np.clip(a - ANGLE_FREE, 0.0, ANGLE_HARD - ANGLE_FREE)
-    forbid = np.maximum(a - ANGLE_HARD, 0.0)
+    free = np.minimum(a, free_lim)
+    hard = np.clip(a - free_lim, 0.0, hard_lim - free_lim)
+    forbid = np.maximum(a - hard_lim, 0.0)
     return W_FREE * free + W_HARD * hard + W_FORBID * forbid
+
+
+def grade(dev_deg, joint, bands=None):
+    """Grade the worst deviation of a joint as OK / HARD / FORBIDDEN."""
+    if len(np.atleast_1d(dev_deg)) == 0:
+        return "-"
+    free_lim, hard_lim = (bands or JOINT_BANDS)[joint]
+    m = float(np.max(np.abs(dev_deg)))
+    return "OK" if m <= free_lim else ("HARD" if m <= hard_lim else "FORBIDDEN")
 
 
 def _seg_point_dist(a, b, p):
@@ -359,7 +401,27 @@ def joint_deviations(st, g: Geometry, lay: Layout):
     dev["pinhead"] = np.array(pin) if pin else np.zeros(0)
     dev["triplet"] = np.array(trip) if trip else np.zeros(0)
     dev["base"] = np.array(base) if base else np.zeros(0)
+    dev.update(contact_deviations(st, g, lay))
     return dev
+
+
+def contact_deviations(st, g: Geometry, lay: Layout):
+    """Rotation of each strand within the frame of the tubule it grips.
+
+    Microtubules are effectively rigid, so what matters at these contacts
+    is how far the strand has twisted relative to the lattice it binds --
+    measured in the tubule's own body frame and compared to
+    :data:`CONTACT_REST`.
+    """
+    nm = lay.nm
+    prev = (np.arange(nm) - 1) % nm
+    lA = np.array([_wrap(st["L"][i]["theta"] - st["trip"][prev[i]][2] - CONTACT_REST["linker-A"])
+                   for i in range(nm)])
+    lC = np.array([_wrap(st["L"][i]["theta"] - st["trip"][i][2] - CONTACT_REST["linker-C"])
+                   for i in range(nm)])
+    pA = np.array([_wrap(st["P"][p]["theta"] - st["trip"][t][2] - CONTACT_REST["pinhead-A"])
+                   for p, (j, t) in enumerate(lay.pairs)]) if lay.pairs else np.zeros(0)
+    return {"linker-A": lA, "linker-C": lC, "pinhead-A": pA}
 
 
 def tubule_positions(st, g: Geometry, lay: Layout):
@@ -437,7 +499,7 @@ def strand_clearances(st, g: Geometry, lay: Layout):
 
 
 # --------------------------------------------------------------------------
-def residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg):
+def residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg, bands=None):
     st = assemble(z, g, lay, reg)
     parts = []
 
@@ -447,9 +509,9 @@ def residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg):
             parts.append(k_bond * BOND_STRENGTH[name] * gv.ravel())
 
     dev = joint_deviations(st, g, lay)
-    for v in dev.values():
+    for jname, v in dev.items():
         if len(v):
-            parts.append(k_angle * angle_penalty(v))
+            parts.append(k_angle * angle_penalty(v, jname, bands))
 
     # keep the triplet ring evenly spaced -- the primary scaffold
     pos = st["trip"][:, :2]
@@ -553,13 +615,6 @@ class Solution:
         return "\n".join(L)
 
 
-def _band(v):
-    if len(v) == 0:
-        return "-"
-    m = float(np.max(np.abs(v)))
-    return "OK" if m <= ANGLE_FREE else ("HARD" if m <= ANGLE_HARD else "FORBIDDEN")
-
-
 def solve(
     geom: Geometry,
     k_bond: float = 12.0,
@@ -570,23 +625,29 @@ def solve(
     max_buckle: float = 0.35,
     register_shift: bool = False,
     shift_range=(-1, 0, 1),
+    bands: Optional[dict] = None,
 ) -> Solution:
     """Relax the network. Optionally search protofilament register shifts.
 
     With `register_shift=True` the pinhead and linker-C contacts are
     allowed to slide to neighbouring protofilaments; every combination in
     `shift_range` is solved and the lowest-cost one returned.
+
+    `bands` overrides :data:`JOINT_BANDS` -- used by
+    :func:`band_sensitivity` to test whether a result depends on them.
     """
     combos = [(a, b) for a in shift_range for b in shift_range] if register_shift else [(0.0, 0.0)]
     best = None
     for reg in combos:
-        s = _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform, max_buckle)
+        s = _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric,
+                       k_uniform, max_buckle, bands)
         if best is None or s[1] < best[1]:
             best = (s[0], s[1])
     return best[0]
 
 
-def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform, max_buckle):
+def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
+               max_buckle, jbands=None):
     g = geom
     lay = Layout(g)
     z0 = _initial_guess(g, lay, reg)
@@ -597,7 +658,7 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform, max_bu
 
     out = least_squares(residuals, z0, bounds=(lo, hi), method="trf",
                         x_scale="jac", ftol=1e-8, xtol=1e-8, gtol=1e-8, max_nfev=8000,
-                        args=(g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg))
+                        args=(g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg, jbands))
     z = out.x
     st = assemble(z, g, lay, reg)
 
@@ -615,7 +676,7 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform, max_bu
     for k, v in dev.items():
         strain[k] = dict(rms=float(np.sqrt(np.mean(v**2))) if len(v) else 0.0,
                          max=float(v[np.argmax(np.abs(v))]) if len(v) else 0.0)
-        bands[k] = _band(v)
+        bands[k] = grade(v, k, jbands)
 
     bl = dict(spoke_rod=lay.b_spoke, pinhead=lay.b_pin, base=lay.b_base,
               linker_armC=lay.b_linkC, linker_armA=lay.b_linkA)
@@ -743,6 +804,32 @@ def summarise(sol: Solution) -> dict:
     rec["n_unattached"] = len(sol.unattached_triplets)
     rec["converged"] = sol.success
     return rec
+
+
+def band_sensitivity(geom: Optional[Geometry] = None,
+                     factors=(0.5, 0.75, 1.0, 1.5, 2.0), **kw):
+    """Re-solve with every joint band scaled, to test robustness.
+
+    The band values are heuristics, so a conclusion is only reportable if
+    it survives them moving. Returns a DataFrame with one row per scale
+    factor: the key metrics plus each joint's grade.
+
+    >>> band_sensitivity(Geometry(N_cw=8, N_mt=9))
+    """
+    import pandas as pd
+
+    base = geom if geom is not None else Geometry()
+    rows = []
+    for f in factors:
+        bands = {k: (a * f, b * f) for k, (a, b) in JOINT_BANDS.items()}
+        sol = solve(base, bands=bands, **kw)
+        rec = {"band_scale": f, "diameter_nm": round(sol.outer_diameter, 2),
+               "joint_rms_deg": round(float(np.sqrt(np.mean(
+                   [v["rms"] ** 2 for v in sol.joint_strain.values()]))), 2),
+               "n_clashes": sol.n_clashes, "worst_bond": sol.worst_bond}
+        rec.update({f"{k}_band": v for k, v in sol.joint_bands.items()})
+        rows.append(rec)
+    return pd.DataFrame(rows)
 
 
 def sweep(param: str, values, geom: Optional[Geometry] = None, **kw):
