@@ -174,8 +174,11 @@ Four tabs:
   the biologically coherent case) or either one alone against a fixed
   partner to probe deliberate mismatch. With register shift enabled, the
   protofilament register the solver chose is reported too.
-- **Symmetry grid** — vary cartwheel and triplet symmetry independently;
-  heatmaps of strain, diameter, clashes and buckling.
+- **2-parameter scan** — cross any two parameters (e.g. SAS-6 coiled-coil
+  length against symmetry), choose from 30 metrics, and view them as
+  heatmaps, as families of curves with a wild-type reference, or both.
+  Choosing the two single-symmetry options reproduces the
+  cartwheel-versus-triplet mismatch grid.
 - **How to read this** — a plain-English key to every readout.
 
 Symmetry uses sliders, tubules-per-blade a radio button, and every distance
@@ -203,8 +206,9 @@ sol = solve(Geometry(N_cw=8, N_mt=9))    # 8-fold cartwheel, 9 triplets
 print(sol.report())
 print(sol.outer_diameter, sol.worst_bond, sol.unattached_triplets)
 
-sweep("spoke_rod", [35, 40, 45, 50, 55])          # one parameter
-sweep2("N_cw", range(7, 12), "N_mt", range(7, 12))  # two-parameter grid
+sweep("spoke_rod", [35, 40, 45, 50, 55])            # one parameter
+sweep("N_both", range(6, 12))                       # symmetry, both rings together
+sweep2("N_both", range(7, 11), "spoke_rod", [40, 45, 50])   # two parameters
 ```
 
 ### Parameters

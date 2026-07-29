@@ -118,22 +118,93 @@ def run_scan(param: str, values: tuple, p: tuple, register_shift: bool):
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
-def run_grid(cw_range: tuple, mt_range: tuple, p: tuple):
+def run_grid(px: str, xvals: tuple, py: str, yvals: tuple, p: tuple,
+             register_shift: bool = False):
+    """Cross any two parameters and tabulate every metric for each cell."""
     base = make_geometry(p)
     rows = []
-    total = len(cw_range) * len(mt_range)
+    total = len(xvals) * len(yvals)
     bar = st.progress(0.0, text=f"Solving {total} configurations…")
     k = 0
-    for a in cw_range:
-        for b in mt_range:
-            g = set_param(set_param(base, "N_cw", a), "N_mt", b)
-            rec = {"N_cw": a, "N_mt": b}
-            rec.update(summarise(solve(g, max_nfev=4000)))
+    for yv in yvals:
+        for xv in xvals:
+            g = set_param(set_param(base, py, yv), px, xv)
+            rec = {px: xv, py: yv}
+            rec.update(summarise(solve(g, register_shift=register_shift, max_nfev=4000)))
             rows.append(rec)
             k += 1
             bar.progress(k / total, text=f"Solved {k} of {total}")
     bar.empty()
     return pd.DataFrame(rows)
+
+
+#: metrics offered for 2-parameter display, grouped label -> column
+GRID_METRICS = {
+    "Outer diameter (nm)": "diameter_nm",
+    "A-tubule ring (nm)": "A_ring_nm",
+    "Lumen (nm)": "lumen_nm",
+    "Triplet tilt (deg)": "triplet_tilt_deg",
+    "Joint strain, RMS (deg)": "joint_rms_deg",
+    "Max buckling (%)": "max_buckle_pct",
+    "MT-MT clashes": "n_clashes",
+    "Worst overlap (nm)": "max_overlap_nm",
+    "Unattached triplets": "n_unattached",
+    "A-C linker clearance (nm)": "linker_clear_nm",
+    "Triplet base clearance (nm)": "base_clear_nm",
+    "SAS-6 spoke clearance (nm)": "spoke_clear_nm",
+    **{f"Joint rotation — {j} (deg)": f"{j}_deg" for j in JOINTS},
+    **{f"Bond load — {b}": f"bond_{b}" for b in BONDS},
+    **{f"Buckling — {b} (%)": f"buckle_{b}_pct" for b in BUCKLE},
+}
+
+
+def heatmap(df, px, py, col, title, cmap="viridis"):
+    piv = df.pivot(index=py, columns=px, values=col)
+    fig, ax = plt.subplots(figsize=(5.8, 4.7))
+    im = ax.imshow(piv.values, cmap=cmap, origin="lower", aspect="auto")
+    ax.set_xticks(range(len(piv.columns)), [f"{v:g}" for v in piv.columns], fontsize=8)
+    ax.set_yticks(range(len(piv.index)), [f"{v:g}" for v in piv.index], fontsize=8)
+    ax.set_xlabel(SCANNABLE[px][0].split("(")[0].strip(), fontsize=9)
+    ax.set_ylabel(SCANNABLE[py][0].split("(")[0].strip(), fontsize=9)
+    ax.set_title(title, fontsize=10)
+    span = np.nanmax(piv.values) - np.nanmin(piv.values)
+    fmt = "{:.0f}" if span > 12 else "{:.2f}"
+    if piv.size <= 90:
+        for r in range(piv.shape[0]):
+            for q in range(piv.shape[1]):
+                v = piv.values[r, q]
+                if np.isfinite(v):
+                    ax.text(q, r, fmt.format(v), ha="center", va="center",
+                            color="w", fontsize=6.5)
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def family(df, px, py, col, title, ylabel, wt=None):
+    """One curve per value of the second parameter -- often easier to read
+    than a heatmap when the x axis is continuous."""
+    fig, ax = plt.subplots(figsize=(6.4, 4.4))
+    for yv, sub in df.groupby(py):
+        sub = sub.sort_values(px)
+        ax.plot(sub[px], sub[col], "o-", lw=1.5, ms=3.5,
+                label=f"{SCANNABLE[py][0].split('(')[0].strip()} = {yv:g}")
+    if wt is not None and col in wt and isinstance(wt[col], (int, float)):
+        ax.axhline(wt[col], color="#888", ls=":", lw=1.2, label="wild type")
+    ax.set_xlabel(SCANNABLE[px][0])
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=10)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=7)
+    fig.tight_layout()
+    return fig
+
+
+def axis_values(param, lo, hi, n):
+    label, is_int, _, _ = SCANNABLE[param]
+    if is_int:
+        return list(range(int(round(lo)), int(round(hi)) + 1))
+    return [round(float(v), 4) for v in np.linspace(lo, hi, int(n))]
 
 
 def badge(label: str, grade: str) -> str:
@@ -225,7 +296,7 @@ PARAMS = (N_cw, N_mt, MTn, spoke_rod, base_length, pinhead_span,
           linker_length, head_contact, n_pf_A)
 
 tab_x, tab_scan, tab_grid, tab_help = st.tabs(
-    ["Cross-section", "Parameter scan", "Symmetry grid", "How to read this"])
+    ["Cross-section", "Parameter scan", "2-parameter scan", "How to read this"])
 
 # ---------------------------------------------------------------- cross-section
 with tab_x:
@@ -420,47 +491,103 @@ with tab_scan:
 
 # ------------------------------------------------------------------------ grid
 with tab_grid:
-    st.markdown("Vary cartwheel and triplet symmetry independently. "
-                "Off-diagonal cells are symmetry-mismatch mutants.")
-    c = st.columns([1, 1, 1, 1, 1.2])
-    cw_lo = c[0].number_input("Cartwheel from", 5, 15, 7)
-    cw_hi = c[1].number_input("Cartwheel to", 5, 15, 11)
-    mt_lo = c[2].number_input("Triplets from", 5, 15, 7)
-    mt_hi = c[3].number_input("Triplets to", 5, 15, 11)
-    go2 = c[4].button("Run grid", type="primary", use_container_width=True)
+    st.markdown("Cross **any two** parameters — e.g. SAS-6 coiled-coil length "
+                "against symmetry. Everything else keeps its sidebar values.")
 
-    if go2 or st.session_state.get("grid_done"):
-        st.session_state["grid_done"] = True
-        cw = tuple(range(int(cw_lo), int(cw_hi) + 1))
-        mt = tuple(range(int(mt_lo), int(mt_hi) + 1))
-        gdf = run_grid(cw, mt, PARAMS)
+    c = st.columns([2.1, 1, 1, 0.85])
+    px = c[0].selectbox("First parameter (x axis)", list(SCANNABLE), index=0,
+                        format_func=lambda k: SCANNABLE[k][0], key="gx_param")
+    xlab, x_int, xlo_l, xhi_l = SCANNABLE[px]
+    xlo = c[1].number_input("From", float(xlo_l), float(xhi_l), float(xlo_l),
+                            step=1.0 if x_int else 0.5,
+                            format="%d" if x_int else "%.2f", key="gx_lo")
+    xhi = c[2].number_input("To", float(xlo_l), float(xhi_l), float(xhi_l),
+                            step=1.0 if x_int else 0.5,
+                            format="%d" if x_int else "%.2f", key="gx_hi")
+    if x_int:
+        nx = max(int(round(xhi)) - int(round(xlo)) + 1, 1)
+        c[3].number_input("Steps", value=nx, disabled=True, key="gx_n_ro")
+    else:
+        nx = int(c[3].number_input("Steps", 2, 20, 6, 1, key="gx_n"))
 
-        panels = [("joint_rms_deg", "Joint strain (deg, RMS)", "magma_r", "{:.0f}"),
-                  ("diameter_nm", "Outer diameter (nm)", "viridis", "{:.0f}"),
-                  ("n_clashes", "MT-MT clashes", "Reds", "{:.0f}"),
-                  ("max_buckle_pct", "Max buckling (%)", "cividis", "{:.1f}")]
-        cols = st.columns(2)
-        for i, (col, title, cmap, fmt) in enumerate(panels):
-            piv = gdf.pivot(index="N_cw", columns="N_mt", values=col)
-            fig, ax = plt.subplots(figsize=(5.6, 4.6))
-            im = ax.imshow(piv.values, cmap=cmap, origin="lower")
-            ax.set_xticks(range(len(piv.columns)), piv.columns)
-            ax.set_yticks(range(len(piv.index)), piv.index)
-            ax.set_xlabel("triplets (N_mt)")
-            ax.set_ylabel("cartwheel (N_cw)")
-            ax.set_title(title, fontsize=10)
-            for r in range(piv.shape[0]):
-                for q in range(piv.shape[1]):
-                    ax.text(q, r, fmt.format(piv.values[r, q]), ha="center",
-                            va="center", color="w", fontsize=7)
-            fig.colorbar(im, ax=ax)
-            fig.tight_layout()
-            cols[i % 2].pyplot(fig)
+    others = [k for k in SCANNABLE if k != px]
+    default_y = "spoke_rod" if px != "spoke_rod" else "N_both"
+    c = st.columns([2.1, 1, 1, 0.85])
+    py = c[0].selectbox("Second parameter (y axis)", others,
+                        index=others.index(default_y),
+                        format_func=lambda k: SCANNABLE[k][0], key="gy_param")
+    ylab, y_int, ylo_l, yhi_l = SCANNABLE[py]
+    ylo = c[1].number_input("From", float(ylo_l), float(yhi_l), float(ylo_l),
+                            step=1.0 if y_int else 0.5,
+                            format="%d" if y_int else "%.2f", key="gy_lo")
+    yhi = c[2].number_input("To", float(ylo_l), float(yhi_l), float(yhi_l),
+                            step=1.0 if y_int else 0.5,
+                            format="%d" if y_int else "%.2f", key="gy_hi")
+    if y_int:
+        ny = max(int(round(yhi)) - int(round(ylo)) + 1, 1)
+        c[3].number_input("Steps", value=ny, disabled=True, key="gy_n_ro")
+    else:
+        ny = int(c[3].number_input("Steps", 2, 20, 5, 1, key="gy_n"))
 
-        with st.expander("Table of all metrics"):
-            st.dataframe(gdf, use_container_width=True, height=320)
-        st.download_button("Download CSV", gdf.to_csv(index=False).encode(),
-                           file_name="symmetry_grid.csv", mime="text/csv")
+    picked = st.multiselect(
+        "Metrics to display", list(GRID_METRICS),
+        default=["Outer diameter (nm)", "Joint strain, RMS (deg)",
+                 "MT-MT clashes", "Max buckling (%)"],
+        key="grid_metrics")
+    view = st.radio("View", ["Heatmaps", "Curves", "Both"], horizontal=True,
+                    index=2, key="grid_view")
+
+    xv, yv = axis_values(px, xlo, xhi, nx), axis_values(py, ylo, yhi, ny)
+    total = len(xv) * len(yv)
+    overlap = set(PARAM_SLOTS[px]) & set(PARAM_SLOTS[py])
+
+    if overlap:
+        st.error(f"“{xlab}” and “{ylab}” both control the same thing, so they "
+                 "cannot be crossed. Pick a different pair — for the "
+                 "cartwheel-versus-triplet mismatch grid, choose the two "
+                 "single-symmetry options rather than the combined one.")
+    elif total > 120:
+        st.error(f"{len(xv)} × {len(yv)} = **{total}** configurations is too many "
+                 "(the cap is 120, roughly four minutes). Narrow a range or "
+                 "reduce the steps.")
+    else:
+        st.caption(f"{len(xv)} × {len(yv)} = **{total}** configurations, "
+                   f"roughly {total * 2 // 60} min {total * 2 % 60} s.")
+        if st.button("Run 2-parameter scan", type="primary", key="grid_go") \
+                or st.session_state.get("grid_done"):
+            st.session_state["grid_done"] = True
+            gdf = run_grid(px, tuple(xv), py, tuple(yv), PARAMS, register_shift)
+            wt = wt_metrics()
+
+            bad = int((~gdf["converged"]).sum())
+            (st.warning if bad else st.success)(
+                f"Solved {len(gdf)} configurations."
+                + (f" {bad} did not converge — treat those cells with caution."
+                   if bad else " All converged."))
+
+            if not picked:
+                st.info("Choose at least one metric above to see plots.")
+            if view in ("Heatmaps", "Both"):
+                st.markdown("#### Heatmaps")
+                cols = st.columns(2)
+                for i, name in enumerate(picked):
+                    col = GRID_METRICS[name]
+                    cmap = ("Reds" if "clash" in col or "overlap" in col
+                            else "magma_r" if "strain" in col or "_deg" in col
+                            else "viridis")
+                    cols[i % 2].pyplot(heatmap(gdf, px, py, col, name, cmap))
+            if view in ("Curves", "Both"):
+                st.markdown("#### Curves — one line per "
+                            f"{ylab.split('(')[0].strip().lower()}")
+                cols = st.columns(2)
+                for i, name in enumerate(picked):
+                    cols[i % 2].pyplot(
+                        family(gdf, px, py, GRID_METRICS[name], name, name, wt))
+
+            with st.expander("Table of all metrics"):
+                st.dataframe(gdf, use_container_width=True, height=320)
+            st.download_button("Download CSV", gdf.to_csv(index=False).encode(),
+                               file_name=f"grid_{px}_vs_{py}.csv", mime="text/csv")
 
 # ------------------------------------------------------------------------ help
 with tab_help:
