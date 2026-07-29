@@ -130,39 +130,54 @@ with st.sidebar:
     st.caption("Centriole cross-section geometry and mechanics. All lengths in nm.")
 
     st.subheader("Symmetry")
-    N_cw = st.slider("Cartwheel spokes (SAS-6)", 5, 15, 9,
-                     help="Number of SAS-6 dimers / spokes in the cartwheel.")
-    N_mt = st.slider("Microtubule triplets", 5, 15, 9,
+    N_cw = st.slider("Cartwheel spokes (SAS-6)", 5, 15, 9, key="N_cw",
+                     help="Number of SAS-6 dimers / spokes in the cartwheel. "
+                          "Values above ~12 are slow to solve.")
+    N_mt = st.slider("Microtubule triplets", 5, 15, 9, key="N_mt",
                      help="Number of microtubule blades. May differ from the "
                           "cartwheel — the triplet ring keeps its spacing and the "
-                          "cartwheel adapts.")
-    MTn = st.radio("Tubules per blade", [3, 2, 1], horizontal=True,
+                          "cartwheel adapts. Values above ~12 are slow to solve.")
+    MTn = st.radio("Tubules per blade", [3, 2, 1], horizontal=True, key="MTn",
                    format_func=lambda v: {3: "Triplet", 2: "Doublet", 1: "Singlet"}[v])
 
     st.subheader("Distances (nm)")
     st.caption("Type any value.")
-    spoke_rod = st.number_input("SAS-6 coiled coil", 5.0, 200.0,
-                                float(DEFAULTS.spoke_rod), 0.5, format="%.2f")
-    base_length = st.number_input("Triplet base", 5.0, 150.0,
-                                  float(DEFAULTS.base_length), 0.5, format="%.2f")
-    pinhead_span = st.number_input("Pinhead", 2.0, 100.0,
-                                   float(DEFAULTS.pinhead_span), 0.5, format="%.2f")
-    linker_length = st.number_input("A-C linker (end to end)", 2.0, 100.0,
-                                    LINKER_DEFAULT, 0.5, format="%.2f")
-    head_contact = st.number_input("SAS-6 head-head spacing", 1.0, 60.0,
-                                   float(DEFAULTS.head_contact), 0.2, format="%.2f")
+    spoke_rod = st.number_input("SAS-6 coiled coil", key="spoke_rod",
+                                min_value=5.0, max_value=200.0,
+                                value=float(DEFAULTS.spoke_rod), step=0.5, format="%.2f")
+    base_length = st.number_input("Triplet base", key="base_length",
+                                  min_value=5.0, max_value=150.0,
+                                  value=float(DEFAULTS.base_length), step=0.5, format="%.2f")
+    pinhead_span = st.number_input("Pinhead", key="pinhead_span",
+                                   min_value=2.0, max_value=100.0,
+                                   value=float(DEFAULTS.pinhead_span), step=0.5, format="%.2f")
+    linker_length = st.number_input("A-C linker (end to end)", key="linker_length",
+                                    min_value=2.0, max_value=100.0,
+                                    value=LINKER_DEFAULT, step=0.5, format="%.2f")
+    head_contact = st.number_input("SAS-6 head-head spacing", key="head_contact",
+                                   min_value=1.0, max_value=60.0,
+                                   value=float(DEFAULTS.head_contact), step=0.2, format="%.2f")
 
     st.subheader("Microtubule")
-    n_pf_A = st.number_input("A-tubule protofilaments", 8, 20,
-                             int(DEFAULTS.n_pf["A"]), 1,
+    n_pf_A = st.number_input("A-tubule protofilaments", key="n_pf_A",
+                             min_value=8, max_value=20,
+                             value=int(DEFAULTS.n_pf["A"]), step=1,
                              help="Also sets the tubule radius: R = n · 5.747 / 2π nm.")
 
-    register_shift = st.checkbox("Allow protofilament register shift", False,
+    register_shift = st.checkbox("Allow protofilament register shift", key="register_shift",
+                                 value=False,
                                  help="Let the pinhead and linker contacts slide to "
-                                      "neighbouring protofilaments to relieve strain.")
+                                      "neighbouring protofilaments to relieve strain. "
+                                      "Solves 9 configurations, so it is ~9x slower.")
 
     if st.button("Reset to wild type", use_container_width=True):
-        st.cache_data.clear()
+        # widget values live in session_state, so they must be cleared too --
+        # clearing only the cache would leave every control where it was
+        for k in ("N_cw", "N_mt", "MTn", "spoke_rod", "base_length", "pinhead_span",
+                  "linker_length", "head_contact", "n_pf_A", "register_shift"):
+            st.session_state.pop(k, None)
+        st.session_state.pop("scan_done", None)
+        st.session_state.pop("grid_done", None)
         st.rerun()
 
 PARAMS = (N_cw, N_mt, MTn, spoke_rod, base_length, pinhead_span,
