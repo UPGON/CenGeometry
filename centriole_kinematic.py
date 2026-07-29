@@ -574,6 +574,8 @@ class Solution:
     success: bool
     outer_diameter: float
     a_ring_diameter: float
+    lumen_diameter: float        # central aperture (inner tubule wall)
+    triplet_tilt: float          # mean triplet axis vs radial, degrees
     joint_strain: dict
     joint_bands: dict
     buckling: dict
@@ -590,7 +592,8 @@ class Solution:
              f"{'converged' if self.success else 'DID NOT CONVERGE'}",
              f"  hub radius     : {g.hub_radius:6.2f} nm   tubule radius {g.tubule_radius:5.2f} nm",
              f"  centriole diam : {self.outer_diameter:6.2f} nm  "
-             f"(A-tubule ring {self.a_ring_diameter:.2f} nm)"]
+             f"(A-tubule ring {self.a_ring_diameter:.2f} nm, lumen {self.lumen_diameter:.2f} nm)",
+             f"  triplet tilt   : {self.triplet_tilt:6.2f} deg from radial"]
         if self.reg != (0.0, 0.0):
             L.append(f"  register shift : pinhead {self.reg[0]:+.0f} pf, linker-C {self.reg[1]:+.0f} pf")
         if self.unattached_triplets:
@@ -626,6 +629,7 @@ def solve(
     register_shift: bool = False,
     shift_range=(-1, 0, 1),
     bands: Optional[dict] = None,
+    base_buckle: Optional[float] = None,
 ) -> Solution:
     """Relax the network. Optionally search protofilament register shifts.
 
@@ -635,19 +639,27 @@ def solve(
 
     `bands` overrides :data:`JOINT_BANDS` -- used by
     :func:`band_sensitivity` to test whether a result depends on them.
+
+    `base_buckle` *drives* the triplet base rather than letting the solver
+    choose it: 0.0 holds the base fully extended (its contour length, the
+    state the schematic depicts), and larger values bend it so its
+    end-to-end chord shortens to `base_length * (1 - base_buckle)`. This is
+    the degree of freedom proposed for iris-like blooming, so driving it
+    turns blooming into a controlled experiment -- see
+    :func:`blooming_scan`.
     """
     combos = [(a, b) for a in shift_range for b in shift_range] if register_shift else [(0.0, 0.0)]
     best = None
     for reg in combos:
         s = _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric,
-                       k_uniform, max_buckle, bands)
+                       k_uniform, max_buckle, bands, base_buckle)
         if best is None or s[1] < best[1]:
             best = (s[0], s[1])
     return best[0]
 
 
 def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
-               max_buckle, jbands=None):
+               max_buckle, jbands=None, base_buckle=None):
     g = geom
     lay = Layout(g)
     z0 = _initial_guess(g, lay, reg)
@@ -655,6 +667,11 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
     hi = np.full(lay.n_total, np.inf)
     lo[lay.n_pose:] = 0.0
     hi[lay.n_pose:] = max_buckle
+    if base_buckle is not None:
+        # pin the base bend instead of letting the solver pick it
+        lo[lay.b_base] = base_buckle
+        hi[lay.b_base] = base_buckle + 1e-9
+        z0[lay.b_base] = base_buckle
 
     out = least_squares(residuals, z0, bounds=(lo, hi), method="trf",
                         x_scale="jac", ftol=1e-8, xtol=1e-8, gtol=1e-8, max_nfev=8000,
@@ -687,10 +704,15 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
     outer = 2.0 * (np.linalg.norm(P, axis=1).max() + g.tubule_radius)
     a_ring = 2.0 * float(np.mean([np.linalg.norm(st["T"][i]["centres"]["A"])
                                   for i in range(lay.nm)]))
+    lumen = 2.0 * max(0.0, float(np.linalg.norm(P, axis=1).min() - g.tubule_radius))
+    tilt = float(np.mean([_wrap(st["trip"][i][2] - np.degrees(np.arctan2(
+        st["T"][i]["centres"]["A"][1], st["T"][i]["centres"]["A"][0])))
+        for i in range(lay.nm)]))
     attached = {t for _, t in lay.pairs}
     sol = Solution(
         geom=g, z=z, lay=lay, state=st, reg=reg, success=bool(out.success),
         outer_diameter=float(outer), a_ring_diameter=a_ring,
+        lumen_diameter=lumen, triplet_tilt=tilt,
         joint_strain=strain, joint_bands=bands, buckling=buckling,
         bond_force=bond, worst_bond=worst,
         n_clashes=int((ov > 1e-6).sum()), max_overlap=float(ov.max()) if ov.size else 0.0,
@@ -804,6 +826,117 @@ def summarise(sol: Solution) -> dict:
     rec["n_unattached"] = len(sol.unattached_triplets)
     rec["converged"] = sol.success
     return rec
+
+
+def soft_modes(geom: Optional[Geometry] = None, n_modes: int = 8,
+               eps: float = 1e-4, amp: float = 1.0, **kw):
+    """Find and rank the softest collective motions of the relaxed network.
+
+    Poke the wild-type solution in every direction and measure how hard it
+    pushes back. Directions that barely resist are the motions the
+    structure can actually perform; stiff ones it effectively cannot. This
+    is normal-mode / elastic-network analysis applied to the linkage.
+
+    For each of the softest modes it reports:
+
+    - ``stiffness``   the mode's eigenvalue, relative to the softest (1.0)
+    - ``coherence``   1.0 means every unit moves identically in its own
+                      frame, i.e. a fully collective, symmetry-preserving
+                      motion (the signature of an iris mode); near 0 means
+                      a local wobble of a few units
+    - ``d_diameter``  change in outer diameter per unit mode amplitude, nm
+    - ``d_tilt``      change in mean triplet tilt, degrees
+
+    An iris mode would appear as a soft mode with high coherence AND
+    non-zero ``d_diameter``. Restricted to the body-pose coordinates:
+    buckling variables sit against their lower bound at wild type (nothing
+    may stretch), so perturbing them symmetrically is unphysical -- drive
+    them explicitly with :func:`blooming_scan` instead.
+    """
+    import pandas as pd
+
+    g = geom if geom is not None else Geometry()
+    lay = Layout(g)
+    sol = solve(g, **kw)
+    z0, reg = sol.z.copy(), sol.reg
+    npose, step = lay.n_pose, 360.0 / lay.nm
+
+    def resid(zz):
+        return residuals(zz, g, lay, 12.0, 0.25, 3.0, 30.0, 6.0, reg, None)
+
+    # finite-difference Jacobian over the pose coordinates -> H = J^T J
+    r0 = resid(z0)
+    J = np.zeros((len(r0), npose))
+    for i in range(npose):
+        dz = np.zeros(len(z0)); dz[i] = eps
+        J[:, i] = (resid(z0 + dz) - resid(z0 - dz)) / (2 * eps)
+    w, V = np.linalg.eigh(J.T @ J)
+
+    def measure(zz):
+        st = assemble(zz, g, lay, reg)
+        P, _, _ = tubule_positions(st, g, lay)
+        d = 2.0 * (np.linalg.norm(P, axis=1).max() + g.tubule_radius)
+        tilt = float(np.mean([_wrap(st["trip"][i][2] - np.degrees(np.arctan2(
+            st["T"][i]["centres"]["A"][1], st["T"][i]["centres"]["A"][0])))
+            for i in range(lay.nm)]))
+        return d, tilt
+
+    d0, t0 = measure(z0)
+    rows = []
+    for k in range(min(n_modes, npose)):
+        v = np.zeros(len(z0)); v[:npose] = V[:, k]
+        dp, tp = measure(z0 + amp * v)
+        dm, tm = measure(z0 - amp * v)
+        # collectivity: do all units move alike in their own rotated frames?
+        tri = V[:, k][lay.i_trip].reshape(-1, 3)
+        loc = np.array([_R(-i * step) @ tri[i, :2] for i in range(lay.nm)])
+        mags = np.linalg.norm(loc, axis=1)
+        coh = float(np.linalg.norm(loc.mean(axis=0)) / mags.mean()) if mags.mean() > 1e-12 else 0.0
+        rows.append({"mode": k, "stiffness": float(w[k]),
+                     "stiffness_rel": round(float(w[k] / max(w[0], 1e-30)), 2),
+                     "coherence": round(coh, 3),
+                     "d_diameter_nm": round((dp - dm) / 2, 3),
+                     "d_tilt_deg": round((tp - tm) / 2, 3)})
+    return pd.DataFrame(rows)
+
+
+def blooming_scan(geom: Optional[Geometry] = None, n: int = 9,
+                  max_bend: float = 0.32, **kw):
+    """Drive the triplet base from bent to fully extended and record the result.
+
+    Tests the proposed iris/blooming mechanism, in which the triplet base
+    is bent in the closed state and straightens to its full contour length
+    as the centriole opens. The schematic the model is calibrated on shows
+    the base **fully extended**, so extension corresponds to
+    ``base_buckle = 0`` and bending to positive values.
+
+    Returns a DataFrame ordered from most bent to fully extended, with the
+    base chord, the resulting diameters and triplet tilt, and whether the
+    cartwheel was disturbed -- the proposal is that it should not be.
+    """
+    import pandas as pd
+
+    base = geom if geom is not None else Geometry()
+    rows = []
+    for b in np.linspace(max_bend, 0.0, n):
+        sol = solve(base, base_buckle=float(b), **kw)
+        rows.append({
+            "base_bend_frac": round(float(b), 4),
+            "base_chord_nm": round(base.base_length * (1 - b), 2),
+            "outer_diam_nm": round(sol.outer_diameter, 2),
+            "lumen_diam_nm": round(sol.lumen_diameter, 2),
+            "A_ring_nm": round(sol.a_ring_diameter, 2),
+            "triplet_tilt_deg": round(sol.triplet_tilt, 2),
+            "spoke_dev_deg": round(sol.joint_strain["spoke"]["max"], 2),
+            "spoke_band": sol.joint_bands["spoke"],
+            "pinhead_dev_deg": round(sol.joint_strain["pinhead"]["max"], 2),
+            "linkerA_dev_deg": round(sol.joint_strain["linker-A"]["max"], 2),
+            "linkerA_band": sol.joint_bands["linker-A"],
+            "base_linker_force": round(sol.bond_force.get("base-linker", {"force": 0})["force"], 3),
+            "worst_bond": sol.worst_bond,
+            "n_clashes": sol.n_clashes,
+        })
+    return pd.DataFrame(rows)
 
 
 def band_sensitivity(geom: Optional[Geometry] = None,
