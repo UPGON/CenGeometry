@@ -780,7 +780,8 @@ def draw(sol: Solution, ax=None, show_pf_labels=False, title=None):
 
 
 # --------------------------------------------------------------------------
-DERIVED_PARAMS = {"linker_length": "end-to-end A-C linker span; scales both arms",
+DERIVED_PARAMS = {"N_both": "sets cartwheel AND triplet symmetry together",
+                  "linker_length": "end-to-end A-C linker span; scales both arms",
                   "n_pf_A": "A-tubule protofilament count; also sets tubule radius",
                   "n_pf_B": "B-tubule protofilament count",
                   "n_pf_C": "C-tubule protofilament count"}
@@ -792,6 +793,9 @@ def _linker_span(g: Geometry) -> float:
 
 
 def set_param(geom: Geometry, name: str, value) -> Geometry:
+    if name == "N_both":
+        # a coherent N-fold centriole has N spokes AND N triplets
+        return replace(geom, N_cw=int(value), N_mt=int(value))
     if name == "linker_length":
         f = float(value) / _linker_span(geom)
         return replace(geom, linker_arm_C=geom.linker_arm_C * f,
@@ -824,6 +828,8 @@ def summarise(sol: Solution) -> dict:
         rec[f"buckle_{k}_pct"] = round(v, 3)
     for k, v in sol.bond_force.items():
         rec[f"bond_{k}"] = round(v["force"], 4)
+    rec["reg_pinhead_pf"] = sol.reg[0]
+    rec["reg_linkerC_pf"] = sol.reg[1]
     rec["worst_bond"] = sol.worst_bond
     rec["worst_bond_force"] = round(sol.bond_force.get(sol.worst_bond, {"force": 0})["force"], 3)
     rec["n_clashes"] = sol.n_clashes

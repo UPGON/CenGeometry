@@ -168,7 +168,12 @@ Four tabs:
   clearances.
 - **Parameter scan** — vary one parameter over a range and plot *all*
   metrics against it, grouped into size / joint rotation / buckling /
-  steric integrity / bond load / clearance. Downloadable as CSV.
+  steric integrity / bond load / clearance, each with a dotted wild-type
+  reference. Cross-sections are rendered above the plots. Downloadable as
+  CSV. Symmetry can be scanned coupled (cartwheel and triplets together,
+  the biologically coherent case) or either one alone against a fixed
+  partner to probe deliberate mismatch. With register shift enabled, the
+  protofilament register the solver chose is reported too.
 - **Symmetry grid** — vary cartwheel and triplet symmetry independently;
   heatmaps of strain, diameter, clashes and buckling.
 - **How to read this** — a plain-English key to every readout.

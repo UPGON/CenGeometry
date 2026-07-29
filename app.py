@@ -34,8 +34,9 @@ BUCKLE = ["spoke_rod", "pinhead", "base", "linker_armC", "linker_armA"]
 
 #: parameters offered for scanning: key -> (label, is_integer, lo, hi)
 SCANNABLE = {
-    "N_cw": ("Cartwheel symmetry (SAS-6 spokes)", True, 6, 11),
-    "N_mt": ("Triplet symmetry (microtubule triplets)", True, 6, 11),
+    "N_both": ("Symmetry — cartwheel and triplets together", True, 6, 11),
+    "N_cw": ("Cartwheel symmetry only (triplets stay fixed)", True, 6, 11),
+    "N_mt": ("Triplet symmetry only (cartwheel stays fixed)", True, 6, 11),
     "MTn": ("Tubules per blade", True, 1, 3),
     "spoke_rod": ("SAS-6 coiled-coil length (nm)", False, 10.0, 90.0),
     "base_length": ("Triplet base length (nm)", False, 10.0, 70.0),
@@ -46,6 +47,12 @@ SCANNABLE = {
 }
 
 BAND_COLOUR = {"OK": "#2e7d32", "HARD": "#e08a00", "FORBIDDEN": "#c62828", "-": "#888888"}
+
+
+#: which slot(s) of the PARAMS tuple a scanned parameter writes to
+PARAM_SLOTS = {"N_both": (0, 1), "N_cw": (0,), "N_mt": (1,), "MTn": (2,),
+               "spoke_rod": (3,), "base_length": (4,), "pinhead_span": (5,),
+               "linker_length": (6,), "head_contact": (7,), "n_pf_A": (8,)}
 
 
 # --------------------------------------------------------------------------
@@ -71,9 +78,9 @@ def wt_metrics() -> dict:
 
 
 @st.cache_data(show_spinner=False, max_entries=128)
-def thumbnail(p: tuple) -> bytes:
+def thumbnail(p: tuple, register_shift: bool = False) -> bytes:
     """Small cross-section render, for the strip above the scan plots."""
-    sol = solve(make_geometry(p), max_nfev=3000)
+    sol = solve(make_geometry(p), register_shift=register_shift, max_nfev=3000)
     fig, ax = plt.subplots(figsize=(3.1, 3.1))
     draw(sol, ax=ax, title="")
     ax.set_xlabel("")
@@ -259,6 +266,18 @@ with tab_x:
 
         st.markdown(f"Closest to rupture: **{m['worst_bond']}** "
                     f"(load {m['worst_bond_force']:.3f})")
+
+        if register_shift:
+            rp, rc = m["reg_pinhead_pf"], m["reg_linkerC_pf"]
+            if rp == 0 and rc == 0:
+                st.info("**Register shift: none chosen.** Staying on the wild-type "
+                        "protofilaments was already the lowest-strain option, so "
+                        "re-registering would not help here.")
+            else:
+                st.info(f"**Register shift chosen:** pinhead {rp:+.0f} protofilament(s) "
+                        f"on the A-tubule, linker {rc:+.0f} on the C-tubule. "
+                        "The structure relieves strain by binding a different "
+                        "protofilament rather than by deforming.")
         st.caption(f"Clearance vs microtubules — linker {m['linker_clear_nm']} nm, "
                    f"base {m['base_clear_nm']} nm, spoke {m['spoke_clear_nm']} nm. "
                    f"Negative means passing through one.")
@@ -330,14 +349,9 @@ with tab_scan:
             thumbs = []
             for v in shown:
                 q = list(PARAMS)
-                if param in ("N_cw", "N_mt", "MTn", "n_pf_A"):
-                    idx = {"N_cw": 0, "N_mt": 1, "MTn": 2, "n_pf_A": 8}[param]
+                for idx in PARAM_SLOTS[param]:
                     q[idx] = v
-                else:
-                    idx = {"spoke_rod": 3, "base_length": 4, "pinhead_span": 5,
-                           "linker_length": 6, "head_contact": 7}[param]
-                    q[idx] = v
-                thumbs.append((v, thumbnail(tuple(q))))
+                thumbs.append((v, thumbnail(tuple(q), register_shift)))
         for row_start in range(0, len(thumbs), 4):
             cols = st.columns(4)
             for col, (v, png) in zip(cols, thumbs[row_start:row_start + 4]):
@@ -380,6 +394,24 @@ with tab_scan:
                              [("joint_rms_deg", "joint strain RMS"),
                               ("triplet_tilt_deg", "triplet tilt from radial")],
                              "degrees", "Overall strain and tilt", wt))
+
+        if register_shift:
+            st.pyplot(line_panel(df, param, label,
+                                 [("reg_pinhead_pf", "pinhead on A-tubule"),
+                                  ("reg_linkerC_pf", "linker on C-tubule")],
+                                 "protofilaments shifted",
+                                 "Protofilament register chosen"))
+            picked = df[(df["reg_pinhead_pf"] != 0) | (df["reg_linkerC_pf"] != 0)]
+            if len(picked):
+                st.caption(
+                    "Register shifted away from wild type at: "
+                    + ", ".join(f"{label.split('(')[0].strip()}={r[param]:g} "
+                                f"(pinhead {r['reg_pinhead_pf']:+.0f}, "
+                                f"linker {r['reg_linkerC_pf']:+.0f})"
+                                for _, r in picked.iterrows()))
+            else:
+                st.caption("No configuration preferred a shifted register — "
+                           "wild-type protofilaments were always lowest-strain.")
 
         with st.expander("Table of all metrics"):
             st.dataframe(df, use_container_width=True, height=320)
