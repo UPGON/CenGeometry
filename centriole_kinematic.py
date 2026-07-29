@@ -828,30 +828,103 @@ def summarise(sol: Solution) -> dict:
     return rec
 
 
-def soft_modes(geom: Optional[Geometry] = None, n_modes: int = 8,
-               eps: float = 1e-4, amp: float = 1.0, **kw):
+@dataclass
+class ModeAnalysis:
+    """Result of :func:`mode_analysis` -- the network's softest motions."""
+
+    geom: Geometry
+    lay: "Layout"
+    z0: np.ndarray
+    reg: tuple
+    eigenvalues: np.ndarray          # ascending
+    eigenvectors: np.ndarray         # columns, pose-space
+    table: "object"                  # pandas DataFrame summary
+
+    def __repr__(self):
+        return f"ModeAnalysis(N_mt={self.geom.N_mt}, {len(self.eigenvalues)} modes)"
+
+
+def _rotation_generator(z0, lay) -> np.ndarray:
+    """Unit vector for 'rotate the whole assembly about the centriole axis'.
+
+    Not an exact symmetry of the model -- the SAS-6 head positions are
+    pinned to fixed radial directions -- so this appears as a very soft
+    'pinwheel' rather than a true zero mode. Reported per mode so
+    rotation-like modes are obvious rather than mistaken for iris motion.
+    """
+    v = np.zeros(lay.n_pose)
+    for sl, n in ((lay.i_trip, lay.nm), (lay.i_link, lay.nm),
+                  (lay.i_pin, lay.npair), (lay.i_base, lay.npair)):
+        arr = z0[sl].reshape(n, 3)
+        out = np.zeros((n, 3))
+        for i in range(n):
+            out[i] = [-arr[i, 1], arr[i, 0], 1.0]
+        v[sl] = out.ravel()
+    v[lay.i_spoke] = 1.0
+    nrm = np.linalg.norm(v)
+    return v / nrm if nrm > 0 else v
+
+
+def _ring_wavenumber(disp, pos):
+    """Dominant angular wavenumber m of a per-unit displacement pattern.
+
+    m = 0 means every unit moves alike (breathing or uniform twist);
+    m = 1 the whole ring shifts sideways; m = 2 an elliptical distortion;
+    higher m are ripples that alternate around the ring. Far more
+    informative than a single 'is it collective?' number.
+    """
+    n = len(pos)
+    c = np.zeros(n, dtype=complex)
+    for i in range(n):
+        r = pos[i] / max(np.linalg.norm(pos[i]), 1e-12)
+        t = np.array([-r[1], r[0]])
+        c[i] = (disp[i] @ r) + 1j * (disp[i] @ t)
+    amp = np.abs(np.fft.fft(c))
+    m = int(np.argmax(amp))
+    return min(m, n - m)          # fold to 0..N/2
+
+
+def _describe_mode(m, d_diam, d_tilt, rot_overlap):
+    if rot_overlap > 0.55:
+        return "global pinwheel (whole assembly rotates against the hub)"
+    if m == 0:
+        if abs(d_diam) > 0.02:
+            return "breathing / IRIS-LIKE (in-phase, diameter changes)"
+        if abs(d_tilt) > 0.02:
+            return "uniform twist (in-phase, diameter fixed)"
+        return "in-phase, but neither diameter nor tilt changes"
+    if m == 1:
+        return "whole ring shifts sideways"
+    if m == 2:
+        return "elliptical distortion"
+    return f"ripple around the ring (m={m})"
+
+
+def mode_analysis(geom: Optional[Geometry] = None, n_modes: int = 6,
+                  eps: float = 1e-4, amp: float = 1.0, **kw) -> ModeAnalysis:
     """Find and rank the softest collective motions of the relaxed network.
 
     Poke the wild-type solution in every direction and measure how hard it
-    pushes back. Directions that barely resist are the motions the
-    structure can actually perform; stiff ones it effectively cannot. This
-    is normal-mode / elastic-network analysis applied to the linkage.
+    pushes back. Directions that barely resist are motions the structure
+    can actually perform; stiff ones it effectively cannot. This is normal
+    mode / elastic network analysis applied to the linkage: the Hessian is
+    approximated as ``J^T J`` at the solution and eigendecomposed.
 
-    For each of the softest modes it reports:
+    Each mode is reported with:
 
-    - ``stiffness``   the mode's eigenvalue, relative to the softest (1.0)
-    - ``coherence``   1.0 means every unit moves identically in its own
-                      frame, i.e. a fully collective, symmetry-preserving
-                      motion (the signature of an iris mode); near 0 means
-                      a local wobble of a few units
-    - ``d_diameter``  change in outer diameter per unit mode amplitude, nm
-    - ``d_tilt``      change in mean triplet tilt, degrees
+    - ``stiffness_rel``   eigenvalue relative to the softest mode
+    - ``wavenumber_m``    how the motion varies around the ring (0 = every
+                          unit alike, 1 = ring shifts, 2 = ellipse, ...)
+    - ``rotation_overlap`` how much of the mode is just global rotation
+    - ``d_diameter_nm`` / ``d_tilt_deg`` what it actually changes
+    - ``description``     the above in words
 
-    An iris mode would appear as a soft mode with high coherence AND
-    non-zero ``d_diameter``. Restricted to the body-pose coordinates:
-    buckling variables sit against their lower bound at wild type (nothing
-    may stretch), so perturbing them symmetrically is unphysical -- drive
-    them explicitly with :func:`blooming_scan` instead.
+    An iris mode is ``wavenumber_m = 0`` with low rotation overlap and
+    non-zero ``d_diameter_nm``.
+
+    Restricted to body-pose coordinates: buckling variables sit against
+    their lower bound at wild type (nothing may stretch), so perturbing
+    them symmetrically is unphysical -- drive those explicitly instead.
     """
     import pandas as pd
 
@@ -859,18 +932,19 @@ def soft_modes(geom: Optional[Geometry] = None, n_modes: int = 8,
     lay = Layout(g)
     sol = solve(g, **kw)
     z0, reg = sol.z.copy(), sol.reg
-    npose, step = lay.n_pose, 360.0 / lay.nm
+    npose = lay.n_pose
 
     def resid(zz):
         return residuals(zz, g, lay, 12.0, 0.25, 3.0, 30.0, 6.0, reg, None)
 
-    # finite-difference Jacobian over the pose coordinates -> H = J^T J
     r0 = resid(z0)
     J = np.zeros((len(r0), npose))
     for i in range(npose):
-        dz = np.zeros(len(z0)); dz[i] = eps
+        dz = np.zeros(len(z0))
+        dz[i] = eps
         J[:, i] = (resid(z0 + dz) - resid(z0 - dz)) / (2 * eps)
     w, V = np.linalg.eigh(J.T @ J)
+    rot = _rotation_generator(z0, lay)
 
     def measure(zz):
         st = assemble(zz, g, lay, reg)
@@ -879,25 +953,131 @@ def soft_modes(geom: Optional[Geometry] = None, n_modes: int = 8,
         tilt = float(np.mean([_wrap(st["trip"][i][2] - np.degrees(np.arctan2(
             st["T"][i]["centres"]["A"][1], st["T"][i]["centres"]["A"][0])))
             for i in range(lay.nm)]))
-        return d, tilt
+        A = np.array([st["T"][i]["centres"]["A"] for i in range(lay.nm)])
+        return d, tilt, A
 
-    d0, t0 = measure(z0)
+    _, _, A0 = measure(z0)
     rows = []
     for k in range(min(n_modes, npose)):
-        v = np.zeros(len(z0)); v[:npose] = V[:, k]
-        dp, tp = measure(z0 + amp * v)
-        dm, tm = measure(z0 - amp * v)
-        # collectivity: do all units move alike in their own rotated frames?
-        tri = V[:, k][lay.i_trip].reshape(-1, 3)
-        loc = np.array([_R(-i * step) @ tri[i, :2] for i in range(lay.nm)])
-        mags = np.linalg.norm(loc, axis=1)
-        coh = float(np.linalg.norm(loc.mean(axis=0)) / mags.mean()) if mags.mean() > 1e-12 else 0.0
-        rows.append({"mode": k, "stiffness": float(w[k]),
-                     "stiffness_rel": round(float(w[k] / max(w[0], 1e-30)), 2),
-                     "coherence": round(coh, 3),
-                     "d_diameter_nm": round((dp - dm) / 2, 3),
-                     "d_tilt_deg": round((tp - tm) / 2, 3)})
-    return pd.DataFrame(rows)
+        v = np.zeros(len(z0))
+        v[:npose] = V[:, k]
+        dp, tp, Ap = measure(z0 + amp * v)
+        dm, tm, Am = measure(z0 - amp * v)
+        disp = (Ap - Am) / 2.0
+        m = _ring_wavenumber(disp, A0)
+        ro = abs(float(rot @ V[:, k]))
+        dd, dt = (dp - dm) / 2, (tp - tm) / 2
+        rows.append({"mode": k,
+                     "stiffness": float(w[k]),
+                     "stiffness_rel": round(float(w[k] / max(w[0], 1e-30)), 1),
+                     "wavenumber_m": m,
+                     "rotation_overlap": round(ro, 2),
+                     "d_diameter_nm": round(dd, 3),
+                     "d_tilt_deg": round(dt, 3),
+                     "description": _describe_mode(m, dd, dt, ro)})
+    return ModeAnalysis(geom=g, lay=lay, z0=z0, reg=reg,
+                        eigenvalues=w, eigenvectors=V, table=pd.DataFrame(rows))
+
+
+def soft_modes(geom: Optional[Geometry] = None, n_modes: int = 6, **kw):
+    """Convenience wrapper: just the summary table from :func:`mode_analysis`."""
+    return mode_analysis(geom, n_modes=n_modes, **kw).table
+
+
+def draw_mode(ma: ModeAnalysis, k: int, ax=None, target_nm: float = 9.0,
+              arrow_scale: float = 1.0, title: Optional[str] = None):
+    """Draw one mode: wild type in grey, the deformed shape over it, arrows.
+
+    The eigenvector is rescaled so the largest tubule displacement equals
+    `target_nm`, purely so the motion is visible -- modes have no intrinsic
+    amplitude.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle
+
+    g, lay = ma.geom, ma.lay
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 6))
+
+    v = np.zeros(len(ma.z0))
+    v[:lay.n_pose] = ma.eigenvectors[:, k]
+
+    def tub(zz):
+        st = assemble(zz, g, lay, ma.reg)
+        P, _, _ = tubule_positions(st, g, lay)
+        return st, P
+
+    st0, P0 = tub(ma.z0)
+    _, P1 = tub(ma.z0 + v)
+    step = target_nm / max(np.linalg.norm(P1 - P0, axis=1).max(), 1e-12)
+    stD, PD = tub(ma.z0 + step * v)
+
+    for st, P, col, lw, alpha, z in ((st0, P0, "#b8bcc4", 1.0, 1.0, 1),
+                                     (stD, PD, "#6b3fa0", 1.6, 0.95, 3)):
+        for j in range(g.N_cw):
+            ax.plot(*np.c_[st["head"][j], st["spoke_tip"][j]],
+                    color=col, lw=lw, alpha=alpha, zorder=z)
+        for i in range(lay.nm):
+            L = st["L"][i]
+            ax.plot(*np.c_[L["end_C"], L["vertex"], L["end_A"]],
+                    color=col, lw=lw, alpha=alpha, zorder=z)
+        for p in range(lay.npair):
+            ax.plot(*np.c_[st["P"][p]["spoke_end"], st["P"][p]["A_end"]],
+                    color=col, lw=lw, alpha=alpha, zorder=z)
+            ax.plot(*np.c_[st["B"][p]["pin_end"], st["B"][p]["link_end"]],
+                    color=col, lw=lw, alpha=alpha, zorder=z)
+        for c in P:
+            ax.add_patch(Circle(c, g.tubule_radius, facecolor="none",
+                                edgecolor=col, lw=lw, alpha=alpha, zorder=z))
+
+    for a, b in zip(P0, PD):
+        d = (b - a) * arrow_scale
+        if np.linalg.norm(d) > 0.35:
+            ax.arrow(a[0], a[1], d[0], d[1], head_width=4.0, head_length=5.0,
+                     fc="#c0392b", ec="#c0392b", length_includes_head=True, zorder=5)
+
+    row = ma.table.iloc[k]
+    lim = 1.12 * (np.abs(PD).max() + g.tubule_radius)
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title(title or f"Mode {k} - {row['description']}\n"
+                          f"stiffness {row['stiffness_rel']}x softest   "
+                          f"m={row['wavenumber_m']}   "
+                          f"$\\Delta$diam {row['d_diameter_nm']:+.2f} nm", fontsize=9)
+    return ax
+
+
+def plot_modes(ma: ModeAnalysis, n: int = 6, path: Optional[str] = None,
+               ncols: int = 3):
+    """Grid of the softest modes plus the stiffness spectrum."""
+    import matplotlib.pyplot as plt
+
+    n = min(n, len(ma.table))
+    nrows = -(-n // ncols)
+    fig = plt.figure(figsize=(5.2 * ncols, 5.2 * nrows + 3.2))
+    gs = fig.add_gridspec(nrows + 1, ncols, height_ratios=[1] * nrows + [0.62])
+    for k in range(n):
+        draw_mode(ma, k, ax=fig.add_subplot(gs[k // ncols, k % ncols]))
+
+    ax = fig.add_subplot(gs[nrows, :])
+    t = ma.table
+    cols = ["#c0392b" if r["wavenumber_m"] == 0 and r["rotation_overlap"] <= 0.55
+            else ("#95a5a6" if r["rotation_overlap"] > 0.55 else "#6b3fa0")
+            for _, r in t.iterrows()]
+    ax.bar(t["mode"], t["stiffness_rel"], color=cols)
+    ax.set_xlabel("mode")
+    ax.set_ylabel("stiffness\n(x softest)")
+    ax.set_title("Stiffness spectrum   "
+                 "grey = global rotation,  red = in-phase (m=0),  purple = m>0",
+                 fontsize=9)
+    ax.grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    if path:
+        fig.savefig(path, dpi=130, bbox_inches="tight")
+    return fig
 
 
 def blooming_scan(geom: Optional[Geometry] = None, n: int = 9,

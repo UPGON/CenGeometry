@@ -185,6 +185,42 @@ Less commonly: `pinhead_span`, `linker_length`, `MTn` (3/2/1 for
 triplet/doublet/singlet), `n_pf_A` (protofilament count, which also sets
 tubule radius).
 
+### Soft-mode (normal-mode) analysis
+
+Which motions can the structure actually perform? `mode_analysis()` pokes
+the relaxed solution in every direction and measures how hard it pushes
+back — normal-mode / elastic-network analysis applied to the linkage. Soft
+directions are motions available at biological energy scales; stiff ones
+effectively are not.
+
+```python
+from centriole_kinematic import Geometry, mode_analysis, plot_modes
+
+ma = mode_analysis(Geometry(), n_modes=6)
+print(ma.table)                       # ranked, with a description per mode
+plot_modes(ma, n=6, path="modes.png") # deformation + arrows + spectrum
+```
+
+Each mode is labelled by its **angular wavenumber `m`** — how the motion
+varies around the ring:
+
+| `m` | Motion |
+|---|---|
+| 0 | every unit alike — breathing/iris (if diameter changes) or uniform twist |
+| 1 | the whole ring shifts sideways |
+| 2 | elliptical distortion |
+| ≥3 | ripples alternating around the ring |
+
+An iris mode is `m = 0` with low `rotation_overlap` and non-zero
+`d_diameter_nm`. `rotation_overlap` flags modes that are merely the whole
+assembly rotating, which would otherwise look deceptively collective.
+
+![example soft modes](docs/soft_modes_example.png)
+
+Sanity check worth knowing: modes should come in **degenerate pairs** for
+every `m > 0` (a sine and a cosine of the same ring wave). They do, which
+is a useful confirmation the decomposition is behaving.
+
 Optional: `solve(..., register_shift=True)` lets the pinhead and linker
 contacts slide to neighbouring protofilaments, testing whether a mutant
 could relieve strain by re-registering instead of deforming.
