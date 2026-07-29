@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CenGeometry — Quick Start</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1a1a1a; --muted:#5c6470; --line:#e2e6ea;
+    --card:#f7f9fb; --accent:#6b3fa0; --accent-soft:#f0e9f8;
+    --green:#4a7a3a; --amber:#9a6a00; --red:#b03030;
+    --code-bg:#1e2430; --code-fg:#e8ecf1;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#14171c; --fg:#e8eaed; --muted:#9aa3af; --line:#2b3038;
+           --card:#1b1f26; --accent:#c4a3e8; --accent-soft:#2a2233;
+           --green:#8fc47a; --amber:#e0b050; --red:#e88a8a; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+       font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:820px;margin:0 auto;padding:40px 24px 80px}
+  header{border-bottom:3px solid var(--accent);padding-bottom:18px;margin-bottom:34px}
+  h1{margin:0 0 6px;font-size:2rem;letter-spacing:-.02em}
+  .sub{color:var(--muted);font-size:1.05rem;margin:0}
+  h2{margin:38px 0 14px;font-size:1.3rem;display:flex;align-items:center;gap:11px}
+  .num{display:inline-flex;align-items:center;justify-content:center;
+       width:29px;height:29px;border-radius:50%;background:var(--accent);
+       color:#fff;font-size:.92rem;font-weight:700;flex:none}
+  @media (prefers-color-scheme:dark){ .num{color:#14171c} }
+  h3{margin:24px 0 8px;font-size:1.05rem}
+  p{margin:0 0 12px}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;
+       background:var(--accent-soft);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);color:var(--code-fg);padding:15px 17px;border-radius:8px;
+      overflow-x:auto;margin:0 0 14px}
+  pre code{background:none;padding:0;color:inherit;font-size:.875rem;line-height:1.55}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:18px 20px;margin:0 0 16px}
+  .note{border-left:4px solid var(--accent);background:var(--accent-soft);
+        padding:13px 17px;border-radius:0 8px 8px 0;margin:0 0 16px}
+  .note strong{color:var(--accent)}
+  table{border-collapse:collapse;width:100%;margin:0 0 16px;font-size:.94rem}
+  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-weight:600;color:var(--muted);font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
+  .scroll{overflow-x:auto}
+  .tag{display:inline-block;padding:2px 9px;border-radius:20px;font-size:.78rem;font-weight:700}
+  .ok{background:rgba(74,122,58,.16);color:var(--green)}
+  .hard{background:rgba(154,106,0,.16);color:var(--amber)}
+  .bad{background:rgba(176,48,48,.16);color:var(--red)}
+  ul{margin:0 0 14px;padding-left:22px} li{margin-bottom:6px}
+  .os{color:var(--muted);font-size:.86rem;margin:-8px 0 12px}
+  footer{margin-top:52px;padding-top:20px;border-top:1px solid var(--line);
+         color:var(--muted);font-size:.88rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>CenGeometry</h1>
+  <p class="sub">Modelling how centriole architecture responds to structural perturbation — a guide that assumes no programming experience.</p>
+</header>
+
+<div class="note">
+  <strong>What this does.</strong> You change something about the centriole — the
+  number of cartwheel spokes, the length of the SAS-6 coiled coil, whether the
+  microtubules are triplets or doublets — and the model works out whether the ring
+  can still hold together, what has to bend to make it fit, and what would break first.
+</div>
+
+<h2><span class="num">1</span>Install Python</h2>
+<p>Check whether you already have it. Open a terminal
+  (<strong>Mac:</strong> Terminal &nbsp;·&nbsp; <strong>Windows:</strong> PowerShell) and type:</p>
+<pre><code>python3 --version</code></pre>
+<p>If you see a number of 3.9 or higher, skip ahead. Otherwise download the installer
+  from <strong>python.org/downloads</strong> and run it.</p>
+<p class="os"><strong>Windows note:</strong> during installation, tick “Add Python to PATH”
+  on the first screen. Use <code>python</code> instead of <code>python3</code> in every
+  command below.</p>
+
+<h2><span class="num">2</span>Download and set up CenGeometry</h2>
+<p>Run these four commands one at a time. The first moves into your Downloads folder —
+  change the path if you put the project elsewhere.</p>
+<pre><code>cd ~/Downloads/CenGeometry
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt</code></pre>
+<p class="os"><strong>Windows:</strong> replace the third line with
+  <code>.venv\Scripts\activate</code></p>
+<div class="card">
+  <p style="margin:0"><strong>What just happened.</strong> You made a private, self-contained
+  workspace (<code>.venv</code>) and installed the four scientific packages the model needs.
+  Nothing else on your computer was changed.</p>
+</div>
+<div class="note">
+  <strong>Every new session</strong>, run <code>source .venv/bin/activate</code> again
+  before using the model. You will see <code>(.venv)</code> at the start of your prompt
+  when it is active.
+</div>
+
+<h2><span class="num">3</span>Run it</h2>
+<pre><code>python run_analysis.py</code></pre>
+<p>That produces the standard report: the wild-type centriole, a comparison of symmetry
+  mutants, and two sweeps. It takes about a minute. Everything is written to a new
+  <strong><code>results</code></strong> folder — open the PNG files to see the figures,
+  and the CSV files in Excel.</p>
+
+<h3>Testing a specific perturbation</h3>
+<div class="scroll">
+<table>
+  <tr><th>Question</th><th>Command</th></tr>
+  <tr><td>What if SAS-6 makes an 8-fold cartwheel but there are still 9 triplets?</td>
+      <td><code>python run_analysis.py --cartwheel 8</code></td></tr>
+  <tr><td>What if the whole centriole is 8-fold?</td>
+      <td><code>python run_analysis.py --cartwheel 8 --triplets 8</code></td></tr>
+  <tr><td>What if the C-tubule is missing (doublets)?</td>
+      <td><code>python run_analysis.py --tubules 2</code></td></tr>
+  <tr><td>What if the SAS-6 coiled coil is 10 nm longer?</td>
+      <td><code>python run_analysis.py --spoke-length 55</code></td></tr>
+  <tr><td>What if the triplet base is shorter?</td>
+      <td><code>python run_analysis.py --base-length 28</code></td></tr>
+  <tr><td>How does coiled-coil length matter across a range?</td>
+      <td><code>python run_analysis.py --sweep spoke_rod --from 35 --to 60</code></td></tr>
+  <tr><td>Show me every option</td>
+      <td><code>python run_analysis.py --help</code></td></tr>
+</table>
+</div>
+<p>All lengths are in nanometres. You can combine options, for example
+  <code>--cartwheel 8 --spoke-length 50</code>.</p>
+
+<h2><span class="num">4</span>Read the results</h2>
+
+<h3>Joint rotation — can the parts still fit?</h3>
+<p>Each connection can pivot. The model reports how far each had to turn away from its
+  wild-type angle:</p>
+<div class="scroll">
+<table>
+  <tr><th>Grade</th><th>Rotation</th><th>Interpretation</th></tr>
+  <tr><td><span class="tag ok">OK</span></td><td>under 15°</td>
+      <td>Comfortably accommodated</td></tr>
+  <tr><td><span class="tag hard">HARD</span></td><td>15–35°</td>
+      <td>Strained but achievable — expect distortion</td></tr>
+  <tr><td><span class="tag bad">FORBIDDEN</span></td><td>over 35°</td>
+      <td>Very costly; unlikely to form this way</td></tr>
+</table>
+</div>
+
+<h3>Bond load — what breaks first?</h3>
+<p>Connections are ranked by the strain they carry. The one at the top of the list is the
+  most likely failure point, which is the model's most directly testable prediction.</p>
+
+<h3>The rest</h3>
+<div class="scroll">
+<table>
+  <tr><th>Line</th><th>Means</th></tr>
+  <tr><td><strong>centriole diam</strong></td>
+      <td>Resulting diameter in nm. Real centrioles are about 250 nm.</td></tr>
+  <tr><td><strong>unattached triplets</strong></td>
+      <td>Triplets the cartwheel could not reach — expected when the two symmetries differ.</td></tr>
+  <tr><td><strong>buckling</strong></td>
+      <td>Segments forced to bow because space got tight. Nothing is ever stretched.</td></tr>
+  <tr><td><strong>MT-MT clashes</strong></td>
+      <td>Microtubules overlapping in space. Anything above zero is physically impossible.</td></tr>
+  <tr><td><strong>strand clearance</strong></td>
+      <td>How close the linker, base and spoke pass to a microtubule. Negative means passing through one.</td></tr>
+</table>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Worked example: an 8-fold cartwheel with 9 triplets</h3>
+  <p>Running <code>python run_analysis.py --cartwheel 8</code> reports a diameter of
+  <strong>255 nm</strong> — unchanged from wild type — with the triplets barely strained
+  (<span class="tag ok">OK</span>) but the spokes at <span class="tag hard">HARD</span>,
+  one triplet left unattached, and the triplet-base-to-A-C-linker bond carrying the
+  highest load.</p>
+  <p style="margin:0"><strong>Reading:</strong> the microtubule ring keeps its normal
+  architecture and the cartwheel absorbs the entire mismatch. The prediction is that
+  such a mutant would look near-normal in cross-section, with the defect concentrated
+  at the cartwheel and the base–linker junction the first thing to fail.</p>
+</div>
+
+<h2><span class="num">5</span>If something goes wrong</h2>
+<div class="scroll">
+<table>
+  <tr><th>Message</th><th>Fix</th></tr>
+  <tr><td><code>command not found: python3</code></td>
+      <td>Python is not installed, or not on your PATH — redo step 1. On Windows use <code>python</code>.</td></tr>
+  <tr><td><code>No module named 'numpy'</code></td>
+      <td>The workspace is not active. Run <code>source .venv/bin/activate</code>, then retry.</td></tr>
+  <tr><td><code>No such file or directory</code></td>
+      <td>You are in the wrong folder. Use <code>cd</code> to move into the CenGeometry folder.</td></tr>
+  <tr><td>Nothing appears in <code>results</code></td>
+      <td>Look for a red error in the terminal output and check the two rows above.</td></tr>
+</table>
+</div>
+
+<footer>
+  <p style="margin:0 0 6px"><strong>Going further.</strong> <code>README.md</code> covers
+  the model's design, where every measurement came from, and the Python interface for
+  custom analyses.</p>
+  <p style="margin:0">Model dimensions are measured from a cryo-ET-derived schematic;
+  see <code>svg_calibration.py</code> for the provenance of each number.</p>
+</footer>
+
+</div>
+</body>
+</html>

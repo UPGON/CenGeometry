@@ -1,0 +1,16 @@
+# virtual environment
+.venv/
+
+# python
+__pycache__/
+*.pyc
+
+# notebooks
+.ipynb_checkpoints/
+
+# generated output
+results/
+/*.png
+/*.pdf
+/*.csv
+.claude/
