@@ -13,6 +13,7 @@ import io
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -33,8 +34,8 @@ BUCKLE = ["spoke_rod", "pinhead", "base", "linker_armC", "linker_armA"]
 
 #: parameters offered for scanning: key -> (label, is_integer, lo, hi)
 SCANNABLE = {
-    "N_cw": ("Cartwheel symmetry (SAS-6 spokes)", True, 5, 15),
-    "N_mt": ("Triplet symmetry (microtubule triplets)", True, 5, 15),
+    "N_cw": ("Cartwheel symmetry (SAS-6 spokes)", True, 6, 11),
+    "N_mt": ("Triplet symmetry (microtubule triplets)", True, 6, 11),
     "MTn": ("Tubules per blade", True, 1, 3),
     "spoke_rod": ("SAS-6 coiled-coil length (nm)", False, 10.0, 90.0),
     "base_length": ("Triplet base length (nm)", False, 10.0, 70.0),
@@ -58,10 +59,34 @@ def make_geometry(p: tuple) -> Geometry:
     return set_param(g, "linker_length", float(linker_length))
 
 
+WT_PARAMS = (9, 9, 3, float(DEFAULTS.spoke_rod), float(DEFAULTS.base_length),
+             float(DEFAULTS.pinhead_span), LINKER_DEFAULT,
+             float(DEFAULTS.head_contact), int(DEFAULTS.n_pf["A"]))
+
+
+@st.cache_data(show_spinner=False)
+def wt_metrics() -> dict:
+    """Wild-type values, drawn as a dotted reference on every scan plot."""
+    return summarise(solve(make_geometry(WT_PARAMS)))
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def thumbnail(p: tuple) -> bytes:
+    """Small cross-section render, for the strip above the scan plots."""
+    sol = solve(make_geometry(p), max_nfev=3000)
+    fig, ax = plt.subplots(figsize=(3.1, 3.1))
+    draw(sol, ax=ax, title="")
+    ax.set_xlabel("")
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=95, bbox_inches="tight")
+    plt.close(fig)
+    return buf.getvalue()
+
+
 @st.cache_data(show_spinner=False, max_entries=256)
 def run_one(p: tuple, register_shift: bool):
     """Solve one configuration. Returns (metrics, report text, figure PNG)."""
-    sol = solve(make_geometry(p), register_shift=register_shift)
+    sol = solve(make_geometry(p), register_shift=register_shift, max_nfev=5000)
     fig, ax = plt.subplots(figsize=(7.2, 7.2))
     draw(sol, ax=ax)
     buf = io.BytesIO()
@@ -78,7 +103,7 @@ def run_scan(param: str, values: tuple, p: tuple, register_shift: bool):
     for i, v in enumerate(values):
         g = set_param(base, param, v)
         rec = {param: v}
-        rec.update(summarise(solve(g, register_shift=register_shift)))
+        rec.update(summarise(solve(g, register_shift=register_shift, max_nfev=4000)))
         rows.append(rec)
         bar.progress((i + 1) / len(values), text=f"Solved {i+1} of {len(values)}")
     bar.empty()
@@ -96,7 +121,7 @@ def run_grid(cw_range: tuple, mt_range: tuple, p: tuple):
         for b in mt_range:
             g = set_param(set_param(base, "N_cw", a), "N_mt", b)
             rec = {"N_cw": a, "N_mt": b}
-            rec.update(summarise(solve(g)))
+            rec.update(summarise(solve(g, max_nfev=4000)))
             rows.append(rec)
             k += 1
             bar.progress(k / total, text=f"Solved {k} of {total}")
@@ -109,17 +134,26 @@ def badge(label: str, grade: str) -> str:
             f"border-radius:12px;font-size:.78rem;font-weight:700'>{label} {grade}</span>")
 
 
-def line_panel(df, xcol, xlabel, series, ylabel, title):
+def line_panel(df, xcol, xlabel, series, ylabel, title, wt=None):
+    """One panel. `wt` adds a faint dotted line at each metric's wild-type
+    value, so any departure from wild type is readable at a glance."""
     fig, ax = plt.subplots(figsize=(7, 4))
     for col, lab in series:
-        if col in df:
-            ax.plot(df[xcol], df[col], "o-", label=lab, lw=1.6, ms=4)
+        if col not in df:
+            continue
+        line, = ax.plot(df[xcol], df[col], "o-", label=lab, lw=1.6, ms=4)
+        if wt is not None and col in wt and isinstance(wt[col], (int, float)):
+            ax.axhline(wt[col], color=line.get_color(), ls=":", lw=1.1, alpha=0.5)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=10)
     ax.grid(alpha=0.3)
-    if len(series) > 1:
-        ax.legend(fontsize=8)
+    handles, labels = ax.get_legend_handles_labels()
+    if wt is not None:
+        handles.append(Line2D([0], [0], color="#888", ls=":", lw=1.1))
+        labels.append("wild type")
+    if len(handles) > 1:
+        ax.legend(handles, labels, fontsize=8)
     fig.tight_layout()
     return fig
 
@@ -191,6 +225,9 @@ with tab_x:
     with st.spinner("Solving…"):
         m, report, png = run_one(PARAMS, register_shift)
 
+    if not m["converged"]:
+        st.warning("The solver did not fully converge at these values — the geometry "
+                   "shown is its best attempt, so read the numbers with caution.")
     left, right = st.columns([1, 1.25])
     with left:
         st.image(png, use_container_width=True)
@@ -251,55 +288,98 @@ with tab_scan:
     param = c[0].selectbox("Parameter to vary", list(SCANNABLE),
                            format_func=lambda k: SCANNABLE[k][0])
     label, is_int, lo_lim, hi_lim = SCANNABLE[param]
-    step_fmt = "%d" if is_int else "%.2f"
-    lo = c[1].number_input("From", float(lo_lim), float(hi_lim), float(lo_lim), format=step_fmt)
-    hi = c[2].number_input("To", float(lo_lim), float(hi_lim), float(hi_lim), format=step_fmt)
-    n = c[3].number_input("Steps", 2, 40, 8, 1)
+    fmt = "%d" if is_int else "%.2f"
+    step = 1.0 if is_int else 0.5
+    lo = c[1].number_input("From", float(lo_lim), float(hi_lim), float(lo_lim),
+                           step=step, format=fmt)
+    hi = c[2].number_input("To", float(lo_lim), float(hi_lim), float(hi_lim),
+                           step=step, format=fmt)
+    if is_int:
+        # whole-number parameters step one at a time, so the count follows
+        # from the range -- for symmetry that is one point per fold
+        n = max(int(round(hi)) - int(round(lo)) + 1, 1)
+        c[3].number_input("Steps", value=n, disabled=True,
+                          help="Set automatically: one point per whole value.")
+    else:
+        n = int(c[3].number_input("Steps", 2, 40, 8, 1))
     go = c[4].button("Run scan", type="primary", use_container_width=True)
 
     if go or st.session_state.get("scan_done"):
         st.session_state["scan_done"] = True
-        vals = np.linspace(lo, hi, int(n))
         if is_int:
-            vals = sorted({int(round(v)) for v in vals})
+            vals = list(range(int(round(lo)), int(round(hi)) + 1))
         else:
-            vals = [round(float(v), 4) for v in vals]
+            vals = [round(float(v), 4) for v in np.linspace(lo, hi, n)]
         df = run_scan(param, tuple(vals), PARAMS, register_shift)
+        wt = wt_metrics()
 
-        st.success(f"Solved {len(df)} configurations. "
-                   f"{int((~df['converged']).sum())} failed to converge.")
+        bad = int((~df["converged"]).sum())
+        msg = f"Solved {len(df)} configurations."
+        (st.warning if bad else st.success)(
+            msg + (f" {bad} did not converge — treat those points with caution."
+                   if bad else " All converged."))
+
+        # ---- cross-sections above the plots
+        st.markdown("**Cross-sections**")
+        shown = vals if len(vals) <= 8 else [vals[i] for i in
+                                            np.linspace(0, len(vals) - 1, 8).astype(int)]
+        if len(shown) < len(vals):
+            st.caption(f"Showing {len(shown)} of {len(vals)} evenly spaced; "
+                       f"the plots below use all {len(vals)}.")
+        with st.spinner("Rendering cross-sections…"):
+            thumbs = []
+            for v in shown:
+                q = list(PARAMS)
+                if param in ("N_cw", "N_mt", "MTn", "n_pf_A"):
+                    idx = {"N_cw": 0, "N_mt": 1, "MTn": 2, "n_pf_A": 8}[param]
+                    q[idx] = v
+                else:
+                    idx = {"spoke_rod": 3, "base_length": 4, "pinhead_span": 5,
+                           "linker_length": 6, "head_contact": 7}[param]
+                    q[idx] = v
+                thumbs.append((v, thumbnail(tuple(q))))
+        for row_start in range(0, len(thumbs), 4):
+            cols = st.columns(4)
+            for col, (v, png) in zip(cols, thumbs[row_start:row_start + 4]):
+                vtxt = f"{int(v)}" if is_int else f"{v:g}"
+                d = df.loc[df[param] == v, "diameter_nm"]
+                col.image(png, use_container_width=True)
+                col.caption(f"{label.split('(')[0].strip()} = **{vtxt}**"
+                            + (f" · Ø {d.iloc[0]:.0f} nm" if len(d) else ""))
+        st.divider()
+
         g1, g2 = st.columns(2)
         with g1:
             st.pyplot(line_panel(df, param, label,
                                  [("diameter_nm", "outer diameter"),
                                   ("A_ring_nm", "A-tubule ring"),
                                   ("lumen_nm", "lumen")],
-                                 "nm", "Size"))
+                                 "nm", "Size", wt))
             st.pyplot(line_panel(df, param, label,
                                  [(f"{j}_deg", j) for j in JOINTS],
-                                 "degrees from wild type", "Joint rotation"))
+                                 "degrees from wild type", "Joint rotation", wt))
             st.pyplot(line_panel(df, param, label,
                                  [(f"buckle_{b}_pct", b) for b in BUCKLE],
-                                 "% of contour lost", "Buckling"))
+                                 "% of contour lost", "Buckling", wt))
         with g2:
             st.pyplot(line_panel(df, param, label,
                                  [("n_clashes", "MT-MT clashes"),
                                   ("max_overlap_nm", "worst overlap (nm)"),
                                   ("n_unattached", "unattached triplets")],
-                                 "count / nm", "Steric integrity"))
+                                 "count / nm", "Steric integrity", wt))
             st.pyplot(line_panel(df, param, label,
                                  [(f"bond_{k}", k) for k in BONDS],
-                                 "load (gap × strength)", "Bond load"))
+                                 "load (gap × strength)", "Bond load", wt))
             st.pyplot(line_panel(df, param, label,
                                  [("linker_clear_nm", "A-C linker"),
                                   ("base_clear_nm", "triplet base"),
                                   ("spoke_clear_nm", "SAS-6 spoke")],
                                  "nm (negative = clashing)",
-                                 "Strand clearance vs microtubules"))
+                                 "Strand clearance vs microtubules", wt))
         st.pyplot(line_panel(df, param, label,
                              [("joint_rms_deg", "joint strain RMS"),
                               ("triplet_tilt_deg", "triplet tilt from radial")],
-                             "degrees", "Overall strain and tilt"))
+                             "degrees", "Overall strain and tilt", wt))
 
         with st.expander("Table of all metrics"):
             st.dataframe(df, use_container_width=True, height=320)

@@ -630,6 +630,7 @@ def solve(
     shift_range=(-1, 0, 1),
     bands: Optional[dict] = None,
     base_buckle: Optional[float] = None,
+    max_nfev: int = 8000,
 ) -> Solution:
     """Relax the network. Optionally search protofilament register shifts.
 
@@ -652,14 +653,14 @@ def solve(
     best = None
     for reg in combos:
         s = _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric,
-                       k_uniform, max_buckle, bands, base_buckle)
+                       k_uniform, max_buckle, bands, base_buckle, max_nfev)
         if best is None or s[1] < best[1]:
             best = (s[0], s[1])
     return best[0]
 
 
 def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
-               max_buckle, jbands=None, base_buckle=None):
+               max_buckle, jbands=None, base_buckle=None, max_nfev=8000):
     g = geom
     lay = Layout(g)
     z0 = _initial_guess(g, lay, reg)
@@ -674,7 +675,7 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
         z0[lay.b_base] = base_buckle
 
     out = least_squares(residuals, z0, bounds=(lo, hi), method="trf",
-                        x_scale="jac", ftol=1e-8, xtol=1e-8, gtol=1e-8, max_nfev=8000,
+                        x_scale="jac", ftol=1e-8, xtol=1e-8, gtol=1e-8, max_nfev=max_nfev,
                         args=(g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg, jbands))
     z = out.x
     st = assemble(z, g, lay, reg)
