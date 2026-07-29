@@ -5,9 +5,12 @@ predict how structural perturbations — SAS-6 mutations that change
 cartwheel symmetry, altered coiled-coil lengths, loss of the C-tubule —
 change the architecture of the whole organelle.
 
-**New here? Open [`QUICKSTART.html`](QUICKSTART.html) in a web browser.**
-It is a one-page, no-coding-required guide to installing and running the
-model.
+**New here?** Double-click **`Launch CenGeometry.command`** (macOS) or
+**`Launch CenGeometry.bat`** (Windows). It sets everything up the first
+time and opens the interactive app in your browser — no terminal, no code.
+
+For the command-line route instead, open
+[`QUICKSTART.html`](QUICKSTART.html) in a web browser.
 
 ---
 
@@ -150,7 +153,30 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Without writing code
+### Interactive app (recommended)
+
+Double-click the launcher for your platform, or run:
+
+```bash
+streamlit run app.py
+```
+
+Four tabs:
+
+- **Cross-section** — set any parameter, see the geometry redraw with every
+  metric: diameters, joint grades, bond loads, buckling, clashes,
+  clearances.
+- **Parameter scan** — vary one parameter over a range and plot *all*
+  metrics against it, grouped into size / joint rotation / buckling /
+  steric integrity / bond load / clearance. Downloadable as CSV.
+- **Symmetry grid** — vary cartwheel and triplet symmetry independently;
+  heatmaps of strain, diameter, clashes and buckling.
+- **How to read this** — a plain-English key to every readout.
+
+Symmetry uses sliders, tubules-per-blade a radio button, and every distance
+is a typed number box so exact values can be entered.
+
+### Command line
 
 ```bash
 python run_analysis.py                                  # standard report
@@ -185,42 +211,6 @@ Less commonly: `pinhead_span`, `linker_length`, `MTn` (3/2/1 for
 triplet/doublet/singlet), `n_pf_A` (protofilament count, which also sets
 tubule radius).
 
-### Soft-mode (normal-mode) analysis
-
-Which motions can the structure actually perform? `mode_analysis()` pokes
-the relaxed solution in every direction and measures how hard it pushes
-back — normal-mode / elastic-network analysis applied to the linkage. Soft
-directions are motions available at biological energy scales; stiff ones
-effectively are not.
-
-```python
-from centriole_kinematic import Geometry, mode_analysis, plot_modes
-
-ma = mode_analysis(Geometry(), n_modes=6)
-print(ma.table)                       # ranked, with a description per mode
-plot_modes(ma, n=6, path="modes.png") # deformation + arrows + spectrum
-```
-
-Each mode is labelled by its **angular wavenumber `m`** — how the motion
-varies around the ring:
-
-| `m` | Motion |
-|---|---|
-| 0 | every unit alike — breathing/iris (if diameter changes) or uniform twist |
-| 1 | the whole ring shifts sideways |
-| 2 | elliptical distortion |
-| ≥3 | ripples alternating around the ring |
-
-An iris mode is `m = 0` with low `rotation_overlap` and non-zero
-`d_diameter_nm`. `rotation_overlap` flags modes that are merely the whole
-assembly rotating, which would otherwise look deceptively collective.
-
-![example soft modes](docs/soft_modes_example.png)
-
-Sanity check worth knowing: modes should come in **degenerate pairs** for
-every `m > 0` (a sine and a cosine of the same ring wave). They do, which
-is a useful confirmation the decomposition is behaving.
-
 Optional: `solve(..., register_shift=True)` lets the pinhead and linker
 contacts slide to neighbouring protofilaments, testing whether a mutant
 could relieve strain by re-registering instead of deforming.
@@ -230,7 +220,9 @@ could relieve strain by re-registering instead of deforming.
 ## Repository layout
 
 ```
-run_analysis.py          command-line entry point (start here)
+Launch CenGeometry.*     double-click launchers (macOS / Windows)
+app.py                   interactive Streamlit app (start here)
+run_analysis.py          command-line entry point
 centriole_kinematic.py   the model
 svg_calibration.py       extracts every constant from the schematic
 QUICKSTART.html          one-page guide for non-programmers
@@ -238,6 +230,11 @@ data/                    source schematics (SVG, Illustrator, PNG)
 legacy/                  the original MATLAB script and earlier ports
 results/                 generated output (not tracked by git)
 ```
+
+`docs/` also holds notes on two parked investigations —
+[blooming / iris motion](docs/blooming_handoff.md) and
+[soft-mode analysis](docs/parked_soft_modes.md) — each self-contained so it
+can be resumed without re-deriving anything.
 
 `legacy/` holds the original MATLAB `centriole.m` this project grew from,
 plus two intermediate Python models. They are superseded by

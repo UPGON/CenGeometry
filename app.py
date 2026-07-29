@@ -1,0 +1,386 @@
+"""CenGeometry — interactive centriole geometry explorer.
+
+Launch by double-clicking the launcher for your platform, or from a
+terminal with:
+
+    streamlit run app.py
+"""
+
+from __future__ import annotations
+
+import io
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from centriole_kinematic import (
+    BOND_STRENGTH, JOINT_BANDS, Geometry, _linker_span, draw, set_param,
+    solve, summarise,
+)
+
+st.set_page_config(page_title="CenGeometry", page_icon="🔬", layout="wide")
+
+DEFAULTS = Geometry()
+LINKER_DEFAULT = round(_linker_span(DEFAULTS), 2)
+
+JOINTS = list(JOINT_BANDS)
+BONDS = list(BOND_STRENGTH)
+BUCKLE = ["spoke_rod", "pinhead", "base", "linker_armC", "linker_armA"]
+
+#: parameters offered for scanning: key -> (label, is_integer, lo, hi)
+SCANNABLE = {
+    "N_cw": ("Cartwheel symmetry (SAS-6 spokes)", True, 5, 15),
+    "N_mt": ("Triplet symmetry (microtubule triplets)", True, 5, 15),
+    "MTn": ("Tubules per blade", True, 1, 3),
+    "spoke_rod": ("SAS-6 coiled-coil length (nm)", False, 10.0, 90.0),
+    "base_length": ("Triplet base length (nm)", False, 10.0, 70.0),
+    "pinhead_span": ("Pinhead length (nm)", False, 5.0, 50.0),
+    "linker_length": ("A-C linker length (nm)", False, 5.0, 60.0),
+    "head_contact": ("SAS-6 head-head spacing (nm)", False, 3.0, 30.0),
+    "n_pf_A": ("A-tubule protofilaments", True, 9, 18),
+}
+
+BAND_COLOUR = {"OK": "#2e7d32", "HARD": "#e08a00", "FORBIDDEN": "#c62828", "-": "#888888"}
+
+
+# --------------------------------------------------------------------------
+def make_geometry(p: tuple) -> Geometry:
+    (N_cw, N_mt, MTn, spoke_rod, base_length, pinhead_span,
+     linker_length, head_contact, n_pf_A) = p
+    g = Geometry(N_cw=int(N_cw), N_mt=int(N_mt), MTn=int(MTn),
+                 spoke_rod=float(spoke_rod), base_length=float(base_length),
+                 pinhead_span=float(pinhead_span), head_contact=float(head_contact))
+    g = set_param(g, "n_pf_A", int(n_pf_A))
+    return set_param(g, "linker_length", float(linker_length))
+
+
+@st.cache_data(show_spinner=False, max_entries=256)
+def run_one(p: tuple, register_shift: bool):
+    """Solve one configuration. Returns (metrics, report text, figure PNG)."""
+    sol = solve(make_geometry(p), register_shift=register_shift)
+    fig, ax = plt.subplots(figsize=(7.2, 7.2))
+    draw(sol, ax=ax)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return summarise(sol), sol.report(), buf.getvalue()
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def run_scan(param: str, values: tuple, p: tuple, register_shift: bool):
+    base = make_geometry(p)
+    rows = []
+    bar = st.progress(0.0, text=f"Solving {len(values)} configurations…")
+    for i, v in enumerate(values):
+        g = set_param(base, param, v)
+        rec = {param: v}
+        rec.update(summarise(solve(g, register_shift=register_shift)))
+        rows.append(rec)
+        bar.progress((i + 1) / len(values), text=f"Solved {i+1} of {len(values)}")
+    bar.empty()
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def run_grid(cw_range: tuple, mt_range: tuple, p: tuple):
+    base = make_geometry(p)
+    rows = []
+    total = len(cw_range) * len(mt_range)
+    bar = st.progress(0.0, text=f"Solving {total} configurations…")
+    k = 0
+    for a in cw_range:
+        for b in mt_range:
+            g = set_param(set_param(base, "N_cw", a), "N_mt", b)
+            rec = {"N_cw": a, "N_mt": b}
+            rec.update(summarise(solve(g)))
+            rows.append(rec)
+            k += 1
+            bar.progress(k / total, text=f"Solved {k} of {total}")
+    bar.empty()
+    return pd.DataFrame(rows)
+
+
+def badge(label: str, grade: str) -> str:
+    return (f"<span style='background:{BAND_COLOUR[grade]};color:#fff;padding:2px 9px;"
+            f"border-radius:12px;font-size:.78rem;font-weight:700'>{label} {grade}</span>")
+
+
+def line_panel(df, xcol, xlabel, series, ylabel, title):
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for col, lab in series:
+        if col in df:
+            ax.plot(df[xcol], df[col], "o-", label=lab, lw=1.6, ms=4)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=10)
+    ax.grid(alpha=0.3)
+    if len(series) > 1:
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+# --------------------------------------------------------------------------
+with st.sidebar:
+    st.title("🔬 CenGeometry")
+    st.caption("Centriole cross-section geometry and mechanics. All lengths in nm.")
+
+    st.subheader("Symmetry")
+    N_cw = st.slider("Cartwheel spokes (SAS-6)", 5, 15, 9,
+                     help="Number of SAS-6 dimers / spokes in the cartwheel.")
+    N_mt = st.slider("Microtubule triplets", 5, 15, 9,
+                     help="Number of microtubule blades. May differ from the "
+                          "cartwheel — the triplet ring keeps its spacing and the "
+                          "cartwheel adapts.")
+    MTn = st.radio("Tubules per blade", [3, 2, 1], horizontal=True,
+                   format_func=lambda v: {3: "Triplet", 2: "Doublet", 1: "Singlet"}[v])
+
+    st.subheader("Distances (nm)")
+    st.caption("Type any value.")
+    spoke_rod = st.number_input("SAS-6 coiled coil", 5.0, 200.0,
+                                float(DEFAULTS.spoke_rod), 0.5, format="%.2f")
+    base_length = st.number_input("Triplet base", 5.0, 150.0,
+                                  float(DEFAULTS.base_length), 0.5, format="%.2f")
+    pinhead_span = st.number_input("Pinhead", 2.0, 100.0,
+                                   float(DEFAULTS.pinhead_span), 0.5, format="%.2f")
+    linker_length = st.number_input("A-C linker (end to end)", 2.0, 100.0,
+                                    LINKER_DEFAULT, 0.5, format="%.2f")
+    head_contact = st.number_input("SAS-6 head-head spacing", 1.0, 60.0,
+                                   float(DEFAULTS.head_contact), 0.2, format="%.2f")
+
+    st.subheader("Microtubule")
+    n_pf_A = st.number_input("A-tubule protofilaments", 8, 20,
+                             int(DEFAULTS.n_pf["A"]), 1,
+                             help="Also sets the tubule radius: R = n · 5.747 / 2π nm.")
+
+    register_shift = st.checkbox("Allow protofilament register shift", False,
+                                 help="Let the pinhead and linker contacts slide to "
+                                      "neighbouring protofilaments to relieve strain.")
+
+    if st.button("Reset to wild type", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+PARAMS = (N_cw, N_mt, MTn, spoke_rod, base_length, pinhead_span,
+          linker_length, head_contact, n_pf_A)
+
+tab_x, tab_scan, tab_grid, tab_help = st.tabs(
+    ["Cross-section", "Parameter scan", "Symmetry grid", "How to read this"])
+
+# ---------------------------------------------------------------- cross-section
+with tab_x:
+    with st.spinner("Solving…"):
+        m, report, png = run_one(PARAMS, register_shift)
+
+    left, right = st.columns([1, 1.25])
+    with left:
+        st.image(png, use_container_width=True)
+    with right:
+        st.subheader("Size")
+        c = st.columns(3)
+        c[0].metric("Outer Ø", f"{m['diameter_nm']:.0f} nm",
+                    delta=f"{m['diameter_nm'] - 254.99:+.0f} vs WT")
+        c[1].metric("A ring", f"{m['A_ring_nm']:.0f} nm")
+        c[2].metric("Lumen", f"{m['lumen_nm']:.0f} nm")
+
+        st.subheader("Strain")
+        c = st.columns(3)
+        c[0].metric("Joint strain", f"{m['joint_rms_deg']:.1f}°")
+        c[1].metric("Triplet tilt", f"{m['triplet_tilt_deg']:.0f}°")
+        c[2].metric("Buckling", f"{m['max_buckle_pct']:.1f} %")
+
+        st.markdown("**Joint grades**", help="Each connection graded against its own "
+                                            "rotation limits.")
+        st.markdown(" ".join(badge(j, m[f"{j}_band"]) for j in JOINTS),
+                    unsafe_allow_html=True)
+
+        st.subheader("Integrity")
+        c = st.columns(2)
+        c[0].metric("MT clashes", m["n_clashes"],
+                    delta="impossible" if m["n_clashes"] else "none",
+                    delta_color="inverse" if m["n_clashes"] else "off")
+        c[1].metric("Unattached", m["n_unattached"])
+
+        st.markdown(f"Closest to rupture: **{m['worst_bond']}** "
+                    f"(load {m['worst_bond_force']:.3f})")
+        st.caption(f"Clearance vs microtubules — linker {m['linker_clear_nm']} nm, "
+                   f"base {m['base_clear_nm']} nm, spoke {m['spoke_clear_nm']} nm. "
+                   f"Negative means passing through one.")
+
+    st.divider()
+    a, b = st.columns(2)
+    with a:
+        st.markdown("**Bond load** (higher = closer to rupture)")
+        bl = pd.DataFrame({"bond": BONDS,
+                           "load": [m.get(f"bond_{k}", 0.0) for k in BONDS]}
+                          ).sort_values("load", ascending=False)
+        st.bar_chart(bl, x="bond", y="load", height=240)
+    with b:
+        st.markdown("**Joint rotation from wild type** (degrees)")
+        jd = pd.DataFrame({"joint": JOINTS,
+                           "degrees": [abs(m[f"{j}_deg"]) for j in JOINTS]})
+        st.bar_chart(jd, x="joint", y="degrees", height=240)
+
+    with st.expander("Full text report"):
+        st.code(report, language=None)
+
+# ------------------------------------------------------------------------ scan
+with tab_scan:
+    st.markdown("Vary one parameter and plot every metric against it. "
+                "All other parameters keep their sidebar values.")
+    c = st.columns([2.2, 1, 1, 1, 1])
+    param = c[0].selectbox("Parameter to vary", list(SCANNABLE),
+                           format_func=lambda k: SCANNABLE[k][0])
+    label, is_int, lo_lim, hi_lim = SCANNABLE[param]
+    step_fmt = "%d" if is_int else "%.2f"
+    lo = c[1].number_input("From", float(lo_lim), float(hi_lim), float(lo_lim), format=step_fmt)
+    hi = c[2].number_input("To", float(lo_lim), float(hi_lim), float(hi_lim), format=step_fmt)
+    n = c[3].number_input("Steps", 2, 40, 8, 1)
+    go = c[4].button("Run scan", type="primary", use_container_width=True)
+
+    if go or st.session_state.get("scan_done"):
+        st.session_state["scan_done"] = True
+        vals = np.linspace(lo, hi, int(n))
+        if is_int:
+            vals = sorted({int(round(v)) for v in vals})
+        else:
+            vals = [round(float(v), 4) for v in vals]
+        df = run_scan(param, tuple(vals), PARAMS, register_shift)
+
+        st.success(f"Solved {len(df)} configurations. "
+                   f"{int((~df['converged']).sum())} failed to converge.")
+        g1, g2 = st.columns(2)
+        with g1:
+            st.pyplot(line_panel(df, param, label,
+                                 [("diameter_nm", "outer diameter"),
+                                  ("A_ring_nm", "A-tubule ring"),
+                                  ("lumen_nm", "lumen")],
+                                 "nm", "Size"))
+            st.pyplot(line_panel(df, param, label,
+                                 [(f"{j}_deg", j) for j in JOINTS],
+                                 "degrees from wild type", "Joint rotation"))
+            st.pyplot(line_panel(df, param, label,
+                                 [(f"buckle_{b}_pct", b) for b in BUCKLE],
+                                 "% of contour lost", "Buckling"))
+        with g2:
+            st.pyplot(line_panel(df, param, label,
+                                 [("n_clashes", "MT-MT clashes"),
+                                  ("max_overlap_nm", "worst overlap (nm)"),
+                                  ("n_unattached", "unattached triplets")],
+                                 "count / nm", "Steric integrity"))
+            st.pyplot(line_panel(df, param, label,
+                                 [(f"bond_{k}", k) for k in BONDS],
+                                 "load (gap × strength)", "Bond load"))
+            st.pyplot(line_panel(df, param, label,
+                                 [("linker_clear_nm", "A-C linker"),
+                                  ("base_clear_nm", "triplet base"),
+                                  ("spoke_clear_nm", "SAS-6 spoke")],
+                                 "nm (negative = clashing)",
+                                 "Strand clearance vs microtubules"))
+        st.pyplot(line_panel(df, param, label,
+                             [("joint_rms_deg", "joint strain RMS"),
+                              ("triplet_tilt_deg", "triplet tilt from radial")],
+                             "degrees", "Overall strain and tilt"))
+
+        with st.expander("Table of all metrics"):
+            st.dataframe(df, use_container_width=True, height=320)
+        st.download_button("Download CSV", df.to_csv(index=False).encode(),
+                           file_name=f"scan_{param}.csv", mime="text/csv")
+
+# ------------------------------------------------------------------------ grid
+with tab_grid:
+    st.markdown("Vary cartwheel and triplet symmetry independently. "
+                "Off-diagonal cells are symmetry-mismatch mutants.")
+    c = st.columns([1, 1, 1, 1, 1.2])
+    cw_lo = c[0].number_input("Cartwheel from", 5, 15, 7)
+    cw_hi = c[1].number_input("Cartwheel to", 5, 15, 11)
+    mt_lo = c[2].number_input("Triplets from", 5, 15, 7)
+    mt_hi = c[3].number_input("Triplets to", 5, 15, 11)
+    go2 = c[4].button("Run grid", type="primary", use_container_width=True)
+
+    if go2 or st.session_state.get("grid_done"):
+        st.session_state["grid_done"] = True
+        cw = tuple(range(int(cw_lo), int(cw_hi) + 1))
+        mt = tuple(range(int(mt_lo), int(mt_hi) + 1))
+        gdf = run_grid(cw, mt, PARAMS)
+
+        panels = [("joint_rms_deg", "Joint strain (deg, RMS)", "magma_r", "{:.0f}"),
+                  ("diameter_nm", "Outer diameter (nm)", "viridis", "{:.0f}"),
+                  ("n_clashes", "MT-MT clashes", "Reds", "{:.0f}"),
+                  ("max_buckle_pct", "Max buckling (%)", "cividis", "{:.1f}")]
+        cols = st.columns(2)
+        for i, (col, title, cmap, fmt) in enumerate(panels):
+            piv = gdf.pivot(index="N_cw", columns="N_mt", values=col)
+            fig, ax = plt.subplots(figsize=(5.6, 4.6))
+            im = ax.imshow(piv.values, cmap=cmap, origin="lower")
+            ax.set_xticks(range(len(piv.columns)), piv.columns)
+            ax.set_yticks(range(len(piv.index)), piv.index)
+            ax.set_xlabel("triplets (N_mt)")
+            ax.set_ylabel("cartwheel (N_cw)")
+            ax.set_title(title, fontsize=10)
+            for r in range(piv.shape[0]):
+                for q in range(piv.shape[1]):
+                    ax.text(q, r, fmt.format(piv.values[r, q]), ha="center",
+                            va="center", color="w", fontsize=7)
+            fig.colorbar(im, ax=ax)
+            fig.tight_layout()
+            cols[i % 2].pyplot(fig)
+
+        with st.expander("Table of all metrics"):
+            st.dataframe(gdf, use_container_width=True, height=320)
+        st.download_button("Download CSV", gdf.to_csv(index=False).encode(),
+                           file_name="symmetry_grid.csv", mime="text/csv")
+
+# ------------------------------------------------------------------------ help
+with tab_help:
+    st.markdown(
+        """
+### What the model does
+
+One repeating centriole unit is a set of **rigid bodies joined by
+connections that can rotate**. Because the units must close into a ring,
+changing one part forces the others to adapt. The model finds the
+least-strained arrangement that still fits together.
+
+### Joint grades
+
+Each connection is graded against **its own** rotation limits — a given
+angle means very different things at a 45 nm spoke and a 13 nm linker arm.
+
+| Grade | Meaning |
+|---|---|
+| **OK** | comfortably accommodated |
+| **HARD** | strained but achievable; expect distortion |
+| **FORBIDDEN** | very costly; unlikely to form this way |
+
+Contacts on microtubules are tightest (they grip a rigid, ordered
+lattice); the triplet axis and base are most permissive.
+
+### The other readouts
+
+| Readout | Meaning |
+|---|---|
+| **Outer diameter** | Real centrioles are about 250 nm. Wild type here gives 255 nm. |
+| **Lumen** | The central aperture. |
+| **Bond load** | Which connection carries most strain, i.e. would break first. Bonds have different strengths, so weak ones yield first. |
+| **Buckling** | Segments forced to bow because space got tight. Nothing ever stretches. |
+| **MT clashes** | Microtubules overlapping in space. Anything above zero is physically impossible. |
+| **Strand clearance** | How close the linker, base or spoke passes to a microtubule. Negative means passing through one. |
+| **Unattached triplets** | Triplets the cartwheel could not reach — expected when the two symmetries differ. |
+
+### Worth knowing
+
+The triplet ring is the primary scaffold: when the two symmetries
+disagree, the triplets keep their spacing and the **cartwheel** absorbs
+the mismatch. Try cartwheel 8 with triplets 9 and watch the spoke grade
+go HARD while the triplets stay OK.
+
+Every dimension is measured from a cryo-ET-derived schematic. The joint
+band values, however, are reasoned heuristics rather than measurements —
+see `README.md`.
+        """
+    )

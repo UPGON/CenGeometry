@@ -816,7 +816,13 @@ def summarise(sol: Solution) -> dict:
     for k, v in js.items():
         rec[f"{k}_deg"] = round(v["max"], 2)
         rec[f"{k}_band"] = sol.joint_bands[k]
+    rec["lumen_nm"] = round(sol.lumen_diameter, 2)
+    rec["triplet_tilt_deg"] = round(sol.triplet_tilt, 2)
     rec["max_buckle_pct"] = round(max(sol.buckling.values()), 2)
+    for k, v in sol.buckling.items():
+        rec[f"buckle_{k}_pct"] = round(v, 3)
+    for k, v in sol.bond_force.items():
+        rec[f"bond_{k}"] = round(v["force"], 4)
     rec["worst_bond"] = sol.worst_bond
     rec["worst_bond_force"] = round(sol.bond_force.get(sol.worst_bond, {"force": 0})["force"], 3)
     rec["n_clashes"] = sol.n_clashes
