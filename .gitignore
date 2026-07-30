@@ -14,3 +14,8 @@ results/
 /*.pdf
 /*.csv
 .claude/
+
+# npm (pptx deck build)
+presentations/node_modules/
+presentations/package-lock.json
+presentations/package.json
