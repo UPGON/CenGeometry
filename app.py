@@ -20,8 +20,13 @@ import streamlit as st
 
 from centriole_kinematic import (
     BOND_STRENGTH, JOINT_BANDS, Geometry, _linker_span, draw, set_param,
-    solve, summarise,
+    summarise,
 )
+# The chain solver holds connection points together by construction, so parts
+# never visibly separate under load. The older spring-based solve() opened the
+# spoke-to-pinhead connection by ~2.8 nm at a 28 nm spoke, which is wrong at
+# any load, so the app uses the chain form throughout.
+from centriole_chain import solve_chain as solve
 
 st.set_page_config(page_title="CenGeometry", page_icon="🔬", layout="wide")
 
@@ -46,7 +51,7 @@ SCANNABLE = {
     "n_pf_A": ("A-tubule protofilaments", True, 9, 18),
 }
 
-BAND_COLOUR = {"OK": "#2e7d32", "HARD": "#e08a00", "FORBIDDEN": "#c62828", "-": "#888888"}
+BAND_COLOUR = {"OK": "#2e7d32", "HARD": "#e08a00", "SEVERE": "#c62828", "-": "#888888"}
 
 
 #: which slot(s) of the PARAMS tuple a scanned parameter writes to
@@ -80,7 +85,7 @@ def wt_metrics() -> dict:
 @st.cache_data(show_spinner=False, max_entries=128)
 def thumbnail(p: tuple, register_shift: bool = False) -> bytes:
     """Small cross-section render, for the strip above the scan plots."""
-    sol = solve(make_geometry(p), register_shift=register_shift, max_nfev=3000)
+    sol = solve(make_geometry(p))
     fig, ax = plt.subplots(figsize=(3.1, 3.1))
     draw(sol, ax=ax, title="")
     ax.set_xlabel("")
@@ -93,7 +98,7 @@ def thumbnail(p: tuple, register_shift: bool = False) -> bytes:
 @st.cache_data(show_spinner=False, max_entries=256)
 def run_one(p: tuple, register_shift: bool):
     """Solve one configuration. Returns (metrics, report text, figure PNG)."""
-    sol = solve(make_geometry(p), register_shift=register_shift, max_nfev=5000)
+    sol = solve(make_geometry(p))
     fig, ax = plt.subplots(figsize=(7.2, 7.2))
     draw(sol, ax=ax)
     buf = io.BytesIO()
@@ -110,7 +115,7 @@ def run_scan(param: str, values: tuple, p: tuple, register_shift: bool):
     for i, v in enumerate(values):
         g = set_param(base, param, v)
         rec = {param: v}
-        rec.update(summarise(solve(g, register_shift=register_shift, max_nfev=4000)))
+        rec.update(summarise(solve(g)))
         rows.append(rec)
         bar.progress((i + 1) / len(values), text=f"Solved {i+1} of {len(values)}")
     bar.empty()
@@ -130,7 +135,7 @@ def run_grid(px: str, xvals: tuple, py: str, yvals: tuple, p: tuple,
         for xv in xvals:
             g = set_param(set_param(base, py, yv), px, xv)
             rec = {px: xv, py: yv}
-            rec.update(summarise(solve(g, register_shift=register_shift, max_nfev=4000)))
+            rec.update(summarise(solve(g)))
             rows.append(rec)
             k += 1
             bar.progress(k / total, text=f"Solved {k} of {total}")
@@ -276,21 +281,24 @@ with st.sidebar:
                              value=int(DEFAULTS.n_pf["A"]), step=1,
                              help="Also sets the tubule radius: R = n · 5.747 / 2π nm.")
 
-    register_shift = st.checkbox("Allow protofilament register shift", key="register_shift",
-                                 value=False,
-                                 help="Let the pinhead and linker contacts slide to "
-                                      "neighbouring protofilaments to relieve strain. "
-                                      "Solves 9 configurations, so it is ~9x slower.")
+    register_shift = st.checkbox(
+        "Allow protofilament register shift", key="register_shift", value=False,
+        disabled=True,
+        help="Not available with the current solver, which holds connection "
+             "points together by construction. The register search existed only "
+             "in the older spring-based solver, which allowed parts to separate.")
 
-    if st.button("Reset to wild type", width='stretch'):
-        # widget values live in session_state, so they must be cleared too --
-        # clearing only the cache would leave every control where it was
+    def _reset_to_wt():
+        # Must run as an on_click callback: it fires BEFORE the script re-runs,
+        # so the widgets are rebuilt from their defaults. Popping the keys
+        # inside the button body instead left the old values on screen until
+        # the page was manually refreshed.
         for k in ("N_cw", "N_mt", "MTn", "spoke_rod", "base_length", "pinhead_span",
-                  "linker_length", "head_contact", "n_pf_A", "register_shift"):
+                  "linker_length", "head_contact", "n_pf_A", "register_shift",
+                  "scan_done", "grid_done"):
             st.session_state.pop(k, None)
-        st.session_state.pop("scan_done", None)
-        st.session_state.pop("grid_done", None)
-        st.rerun()
+
+    st.button("Reset to wild type", width='stretch', on_click=_reset_to_wt)
 
 PARAMS = (N_cw, N_mt, MTn, spoke_rod, base_length, pinhead_span,
           linker_length, head_contact, n_pf_A)
@@ -323,10 +331,14 @@ with tab_x:
         c[1].metric("Triplet tilt", f"{m['triplet_tilt_deg']:.0f}°")
         c[2].metric("Buckling", f"{m['max_buckle_pct']:.1f} %")
 
-        st.markdown("**Joint grades**", help="Each connection graded against its own "
-                                            "rotation limits.")
+        st.markdown("**Joint grades**", help="How far each connection has rotated "
+                                            "from wild type, against its own limits.")
         st.markdown(" ".join(badge(j, m[f"{j}_band"]) for j in JOINTS),
                     unsafe_allow_html=True)
+        st.caption("These are **assumed tolerances, not verdicts on feasibility** — "
+                   "the limits were reasoned rather than measured, and structures are "
+                   "known to assemble in conditions graded SEVERE. Read them as "
+                   "*how far from wild type*, and judge from the geometry and numbers.")
 
         st.subheader("Integrity")
         c = st.columns(2)

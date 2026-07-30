@@ -228,6 +228,8 @@ class ChainSolution:
     max_overlap: float
     strand: dict
     unattached_triplets: list
+    reg: tuple = (0.0, 0.0)
+    ruptured: list = field(default_factory=list)
     exact_bonds: tuple = ("pinhead-spoke", "pinhead-triplet", "base-pinhead", "linker-C")
 
     def report(self) -> str:
@@ -309,6 +311,8 @@ def solve_chain(geom: Optional[Geometry] = None, k_bond: float = 600.0,
         if len(v):
             d = np.linalg.norm(v, axis=1)
             bond[k] = dict(gap=float(d.max()), force=float(d.max() * BOND_STRENGTH[k]))
+    for k in BOND_STRENGTH:                     # exact connections: zero by construction
+        bond.setdefault(k, dict(gap=0.0, force=0.0))
     worst = max(bond, key=lambda k: bond[k]["force"]) if bond else "-"
 
     dev = chain_deviations(st, g, lay)
@@ -318,8 +322,12 @@ def solve_chain(geom: Optional[Geometry] = None, k_bond: float = 600.0,
                          max=float(v[np.argmax(np.abs(v))]) if len(v) else 0.0)
         bnds[k] = grade(v, k, bands)
 
+    # keep the same five keys as the network solver so summarise() and the app
+    # need no special-casing; pinhead and the linker arms are rigid here
     buckling = {"spoke_rod": float(100 * np.max(z[lay.b_spoke])) if lay.ncw else 0.0,
-                "base": float(100 * np.max(z[lay.b_base])) if lay.npair else 0.0}
+                "pinhead": 0.0,
+                "base": float(100 * np.max(z[lay.b_base])) if lay.npair else 0.0,
+                "linker_armC": 0.0, "linker_armA": 0.0}
 
     ov = tubule_overlaps(st, g, lay)
     P, _, _ = tubule_positions(st, g, lay)
@@ -338,4 +346,4 @@ def solve_chain(geom: Optional[Geometry] = None, k_bond: float = 600.0,
         bond_force=bond, worst_bond=worst,
         n_clashes=int((ov > 1e-6).sum()), max_overlap=float(ov.max()) if ov.size else 0.0,
         strand=strand_clearances(st, g, lay),
-        unattached_triplets=sorted(lay.free_trips))
+        unattached_triplets=sorted(lay.free_trips), reg=reg)

@@ -52,7 +52,7 @@ fits together and reports:
 
 | Output | Meaning |
 |---|---|
-| **Joint rotation** | How far each connection turned from its wild-type angle, graded `OK` / `HARD` / `FORBIDDEN` against per-joint limits (see below) |
+| **Joint rotation** | How far each connection turned from its wild-type angle, graded `OK` / `HARD` / `SEVERE` against per-joint limits (see below) |
 | **Bond load** | Which connection carries the most strain, i.e. which would rupture first |
 | **Buckling** | Which segments had to bow because space became too tight (segments never stretch) |
 | **Clashes** | Microtubules overlapping in space — physically impossible |
@@ -81,7 +81,7 @@ fits together and reports:
   rings stack along the centriole axis, which stiffens what looks floppy
   in a single 2D slice.
 
-  | Joint / contact | OK | HARD | FORBIDDEN |
+  | Joint / contact | OK | HARD | SEVERE |
   |---|---|---|---|
   | Linker ↔ A-tubule | ≤ 8° | 8–20° | > 20° |
   | Linker ↔ C-tubule | ≤ 8° | 8–20° | > 20° |
@@ -90,6 +90,12 @@ fits together and reports:
   | Pinhead vs spoke | ≤ 15° | 15–30° | > 30° |
   | Triplet axis vs spoke | ≤ 20° | 20–40° | > 40° |
   | Base vs spoke | ≤ 20° | 20–40° | > 40° |
+
+  **These are assumed tolerances, not verdicts on feasibility.** Centrioles
+  are known to assemble in conditions the model grades SEVERE — for example a
+  28 nm SAS-6 spoke builds real centrioles, yet grades SEVERE at the linker
+  contacts. Read the grades as *how far from wild type*, and judge from the
+  geometry and the numbers.
 
   These values are reasoned heuristics, not measurements — no
   sub-tomogram angular variance was available to calibrate them. The rank

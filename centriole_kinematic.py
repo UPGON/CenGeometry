@@ -152,12 +152,18 @@ def angle_penalty(dev_deg, joint="spoke", bands=None):
 
 
 def grade(dev_deg, joint, bands=None):
-    """Grade the worst deviation of a joint as OK / HARD / FORBIDDEN."""
+    """Grade the worst deviation of a joint as OK / HARD / SEVERE.
+
+    These are assumed tolerances, NOT verdicts on whether a structure can
+    form. The bands were reasoned, not measured, and structures are known to
+    assemble in conditions the model grades SEVERE -- read them as "how far
+    from wild type", and judge feasibility from the geometry and the numbers.
+    """
     if len(np.atleast_1d(dev_deg)) == 0:
         return "-"
     free_lim, hard_lim = (bands or JOINT_BANDS)[joint]
     m = float(np.max(np.abs(dev_deg)))
-    return "OK" if m <= free_lim else ("HARD" if m <= hard_lim else "FORBIDDEN")
+    return "OK" if m <= free_lim else ("HARD" if m <= hard_lim else "SEVERE")
 
 
 def _seg_point_dist(a, b, p):
