@@ -88,6 +88,29 @@ BOND_STRENGTH = {
     "base-linker": 0.25,  # (weakest)
 }
 
+#: A bond may pivot freely but must NOT extend. Below `BOND_SLACK` nm a gap
+#: counts as numerical slop; beyond it the penalty steepens by `BOND_HARD`
+#: per nm, which makes connections effectively inextensible while keeping the
+#: least-squares problem well conditioned near the solution.
+#:
+#: This matters: without it the springs quietly opened 1-3 nm under load,
+#: which is stretching by another name and precisely what the model claims to
+#: exclude. It was masking the real accommodation mechanism.
+#: BOND_HARD is left at 0 (penalty disabled) on purpose. A banded bond
+#: penalty was tried and abandoned: it made the least-squares objective
+#: non-smooth, so wild type went from 1.6 s to 175 s at BOND_HARD=5, and at
+#: 20 the solve diverged outright (22 nm gap). Rigid connections are instead
+#: handled exactly by solve_rigid() below, which eliminates the redundant
+#: pose variables rather than penalising them.
+BOND_SLACK = 0.05
+BOND_HARD = 0.0
+
+#: Extension at which each bond ruptures, in nm -- set equal to its strength,
+#: so the ordering follows BOND_STRENGTH: microtubule contacts tolerate the
+#: most, the triplet-base-to-linker junction the least, and the weakest bonds
+#: therefore fail first.
+RUPTURE_NM = dict(BOND_STRENGTH)
+
 #: Per-joint rotation bands, as (OK-limit, HARD-limit) in degrees. Beyond
 #: the HARD limit a rotation is treated as forbidden.
 #:
@@ -278,10 +301,14 @@ class Geometry:
 # --------------------------------------------------------------------------
 # Body-local geometry
 # --------------------------------------------------------------------------
-def _triplet_local(g: Geometry, reg=(0.0, 0.0)):
-    """Points on a triplet, in its own frame (origin A centre, +x = axis)."""
+def _triplet_local(g: Geometry, reg=(0.0, 0.0, 0.0)):
+    """Points on a triplet, in its own frame (origin A centre, +x = axis).
+
+    `reg` shifts each contact by whole protofilaments:
+    (pinhead on A, linker on A, linker on C).
+    """
     Rt = g.tubule_radius
-    pin_shift, linkC_shift = reg
+    pin_shift, linkA_shift, linkC_shift = reg
     pts = {
         "A": np.zeros(2),
         "B": np.array([g.spacing_ab, 0.0]),
@@ -291,7 +318,7 @@ def _triplet_local(g: Geometry, reg=(0.0, 0.0)):
     return dict(
         centres=pts,
         A_pf34=Rt * _u(g.pf_angle("A", g.pin_pf, pin_shift)),
-        A_pf8=Rt * _u(g.pf_angle("A", g.linkA_pf)),
+        A_pf8=Rt * _u(g.pf_angle("A", g.linkA_pf, linkA_shift)),
         C_pf89=pts[ot] + Rt * _u(g.pf_angle(ot, g.linkC_pf, linkC_shift)),
     )
 
@@ -336,7 +363,7 @@ class Layout:
         self.n_total = i
 
 
-def assemble(z, g: Geometry, lay: Layout, reg=(0.0, 0.0)) -> dict:
+def assemble(z, g: Geometry, lay: Layout, reg=(0.0, 0.0, 0.0)) -> dict:
     trip = z[lay.i_trip].reshape(-1, 3)
     link = z[lay.i_link].reshape(-1, 3)
     pin = z[lay.i_pin].reshape(-1, 3)
@@ -507,14 +534,19 @@ def strand_clearances(st, g: Geometry, lay: Layout):
 
 
 # --------------------------------------------------------------------------
-def residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg, bands=None):
+def residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg,
+              bands=None, broken=()):
     st = assemble(z, g, lay, reg)
     parts = []
 
     gaps = bond_gaps(st, g, lay)
     for name, gv in gaps.items():
         if len(gv):
-            parts.append(k_bond * BOND_STRENGTH[name] * gv.ravel())
+            if name in broken:
+                continue                      # ruptured: no longer transmits load
+            d = np.linalg.norm(gv, axis=1, keepdims=True)
+            w = 1.0 + BOND_HARD * np.maximum(0.0, d - BOND_SLACK)
+            parts.append((k_bond * BOND_STRENGTH[name] * w * gv).ravel())
 
     dev = joint_deviations(st, g, lay)
     for jname, v in dev.items():
@@ -593,6 +625,7 @@ class Solution:
     max_overlap: float
     strand: dict
     unattached_triplets: list
+    ruptured: list = field(default_factory=list)
 
     def report(self) -> str:
         g = self.geom
@@ -602,8 +635,14 @@ class Solution:
              f"  centriole diam : {self.outer_diameter:6.2f} nm  "
              f"(A-tubule ring {self.a_ring_diameter:.2f} nm, lumen {self.lumen_diameter:.2f} nm)",
              f"  triplet tilt   : {self.triplet_tilt:6.2f} deg from radial"]
-        if self.reg != (0.0, 0.0):
-            L.append(f"  register shift : pinhead {self.reg[0]:+.0f} pf, linker-C {self.reg[1]:+.0f} pf")
+        if any(self.reg):
+            L.append(f"  register shift : pinhead {self.reg[0]:+.0f} pf, "
+                     f"linker-A {self.reg[1]:+.0f} pf, linker-C {self.reg[2]:+.0f} pf")
+        if self.ruptured:
+            L.append("  RUPTURED bonds (in order of failure):")
+            for r in self.ruptured:
+                L.append(f"      {r['bond']:<16} opened {r['gap']:.2f} nm "
+                         f"vs {r['threshold']:.2f} nm limit  ({r['ratio']:.1f}x)")
         if self.unattached_triplets:
             L.append(f"  unattached triplets (no pinhead): {self.unattached_triplets}")
         L.append("  joint rotation (deg from wild-type rest)   [band]:")
@@ -635,7 +674,8 @@ def solve(
     k_uniform: float = 6.0,
     max_buckle: float = 0.35,
     register_shift: bool = False,
-    shift_range=(-1, 0, 1),
+    shift_range=(-2, -1, 0, 1, 2),
+    rupture: bool = True,
     bands: Optional[dict] = None,
     base_buckle: Optional[float] = None,
     max_nfev: int = 8000,
@@ -657,18 +697,20 @@ def solve(
     turns blooming into a controlled experiment -- see
     :func:`blooming_scan`.
     """
-    combos = [(a, b) for a in shift_range for b in shift_range] if register_shift else [(0.0, 0.0)]
+    combos = ([(0.0, a, b) for a in shift_range for b in shift_range]
+              if register_shift else [(0.0, 0.0, 0.0)])
     best = None
     for reg in combos:
         s = _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric,
-                       k_uniform, max_buckle, bands, base_buckle, max_nfev)
+                       k_uniform, max_buckle, bands, base_buckle, max_nfev, rupture)
         if best is None or s[1] < best[1]:
             best = (s[0], s[1])
     return best[0]
 
 
 def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
-               max_buckle, jbands=None, base_buckle=None, max_nfev=8000):
+               max_buckle, jbands=None, base_buckle=None, max_nfev=8000,
+               rupture=True):
     g = geom
     lay = Layout(g)
     z0 = _initial_guess(g, lay, reg)
@@ -682,11 +724,36 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
         hi[lay.b_base] = base_buckle + 1e-9
         z0[lay.b_base] = base_buckle
 
-    out = least_squares(residuals, z0, bounds=(lo, hi), method="trf",
-                        x_scale="jac", ftol=1e-8, xtol=1e-8, gtol=1e-8, max_nfev=max_nfev,
-                        args=(g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg, jbands))
-    z = out.x
-    st = assemble(z, g, lay, reg)
+    # Solve, then check every bond against its rupture extension. A bond that
+    # has opened past its threshold has failed, so drop it and re-solve -- the
+    # post-failure geometry is usually the interesting one. Repeat until
+    # everything left holds (or nothing is left to break).
+    broken, rupture_log = [], []
+    for _ in range(len(BOND_STRENGTH)):
+        out = least_squares(residuals, z0, bounds=(lo, hi), method="trf",
+                            x_scale="jac", ftol=1e-8, xtol=1e-8, gtol=1e-8,
+                            max_nfev=max_nfev,
+                            args=(g, lay, k_bond, k_angle, k_buckle, k_steric,
+                                  k_uniform, reg, jbands, tuple(broken)))
+        z = out.x
+        st = assemble(z, g, lay, reg)
+        if not rupture:
+            break
+        over = []
+        for name, gv in bond_gaps(st, g, lay).items():
+            if name in broken or not len(gv):
+                continue
+            d = float(np.linalg.norm(gv, axis=1).max())
+            if d > RUPTURE_NM[name]:
+                over.append((d / RUPTURE_NM[name], name, d))
+        if not over:
+            break
+        over.sort(reverse=True)
+        ratio, name, d = over[0]
+        broken.append(name)
+        rupture_log.append(dict(bond=name, gap=round(d, 3),
+                                threshold=RUPTURE_NM[name], ratio=round(ratio, 2)))
+        z0 = z                                  # warm-start the next attempt
 
     gaps = bond_gaps(st, g, lay)
     bond = {}
@@ -727,6 +794,7 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
         n_clashes=int((ov > 1e-6).sum()), max_overlap=float(ov.max()) if ov.size else 0.0,
         strand=strand_clearances(st, g, lay),
         unattached_triplets=sorted(set(range(lay.nm)) - attached),
+        ruptured=rupture_log,
     )
     return sol, float(0.5 * np.sum(out.fun**2))
 
@@ -788,6 +856,181 @@ def draw(sol: Solution, ax=None, show_pf_labels=False, title=None):
 
 
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Exact rigid-chain solver (symmetric configurations)
+# --------------------------------------------------------------------------
+@dataclass
+class RigidResult:
+    """Exact solution for a symmetric centriole with inextensible bonds."""
+
+    geom: Geometry
+    closed: bool
+    register: tuple              # (linker-A, linker-C) protofilament shift
+    a_radius: float
+    c_radius: float
+    outer_diameter: float
+    a_ring_diameter: float
+    tilt: float                  # triplet axis vs radial, degrees
+    tilt_change: float           # vs wild type
+    base_bow_pct: float          # how far the base had to bow (never stretch)
+    base_shortfall: float        # nm the base would need to GAIN -> impossible
+    ruptured: list
+
+    def report(self) -> str:
+        L = [f"RIGID solve  N={self.geom.N_mt}  "
+             f"{'CLOSES' if self.closed else 'CANNOT CLOSE'}",
+             f"  A-ring diameter : {self.a_ring_diameter:7.2f} nm",
+             f"  outer diameter  : {self.outer_diameter:7.2f} nm",
+             f"  triplet tilt    : {self.tilt:+7.2f} deg from radial "
+             f"({self.tilt_change:+.2f} vs WT)"]
+        if any(self.register):
+            L.append(f"  register shift  : linker-A {self.register[0]:+.0f} pf, "
+                     f"linker-C {self.register[1]:+.0f} pf")
+        else:
+            L.append("  register shift  : none (wild-type protofilaments)")
+        if self.base_bow_pct > 0.01:
+            L.append(f"  triplet base    : bowed {self.base_bow_pct:.1f}% to fit")
+        if self.base_shortfall > 0.01:
+            L.append(f"  triplet base    : {self.base_shortfall:.2f} nm TOO SHORT "
+                     f"-- cannot stretch")
+        for r in self.ruptured:
+            L.append(f"  RUPTURE         : {r['bond']} would need "
+                     f"{r['needed']:.2f} nm vs {r['threshold']:.2f} nm limit")
+        return "\n".join(L)
+
+
+def solve_rigid(geom: Optional[Geometry] = None, register_shift: bool = True,
+                shift_range=(-2, -1, 0, 1, 2), wt_tilt: float = -60.98
+                ) -> RigidResult:
+    """Solve a symmetric centriole exactly, with connections that cannot extend.
+
+    Complements :func:`solve`. That solver gives every body a free pose and
+    ties them with springs, which is what allows mismatched symmetries -- but
+    under a large perturbation it accommodates by opening those springs 1-3 nm,
+    i.e. by stretching, which the model is supposed to forbid. Here the
+    redundant variables are eliminated instead, so bonds are rigid by
+    construction:
+
+    * the A-tubule position follows rigidly from hub + spoke + pinhead;
+    * the triplet is rigid, so C follows A and the tilt;
+    * the tilt is then whatever makes the A-C linker span exactly reach the
+      neighbouring A-tubule -- a single equation in a single unknown;
+    * the triplet base must then reach the linker vertex. It may bow (which
+      shortens it) but never stretch, so a shortfall means no solution.
+
+    With `register_shift`, each linker contact may slide by whole
+    protofilaments and the register giving the least tilt change is chosen --
+    the mechanism by which a mutant can re-register rather than deform.
+
+    Exact and instant: no optimiser, so none of the conditioning problems of
+    the penalty formulation.
+    """
+    from scipy.optimize import brentq
+
+    g = geom if geom is not None else Geometry()
+    N, Rt = g.N_mt, g.tubule_radius
+    step = 360.0 / N
+    LAC = g.spacing_ab + g.spacing_bc
+    span = _linker_span(g)
+
+    # A-tubule centre radius, rigidly determined by the cartwheel chain
+    r_pin = g.hub_radius + g.spoke_rod
+    pin_dir = g.rest_pinhead
+    contact = np.array([r_pin, 0.0]) + g.pinhead_span * _u(pin_dir)
+    axis_ref = g.rest_triplet
+    A_c = contact - Rt * _u(axis_ref + g.pf_angle("A", g.pin_pf))
+    rA = float(np.linalg.norm(A_c))
+
+    def gap(tilt, dA, dC):
+        A0 = rA * _u(0.0)
+        C0 = A0 + LAC * _u(tilt)
+        pC = C0 + Rt * _u(tilt + g.pf_angle("C", g.linkC_pf, dC))
+        A1 = _R(-step) @ (rA * _u(0.0))
+        pA = A1 + Rt * _u(-step + tilt + g.pf_angle("A", g.linkA_pf, dA))
+        return float(np.linalg.norm(pC - pA) - span)
+
+    combos = ([(a, b) for a in shift_range for b in shift_range]
+              if register_shift else [(0, 0)])
+    best = None
+    for dA, dC in combos:
+        xs = np.linspace(-89.0, -8.0, 500)
+        vs = [gap(x, dA, dC) for x in xs]
+        for i in range(len(xs) - 1):
+            if vs[i] * vs[i + 1] >= 0:
+                continue
+            tilt = brentq(gap, xs[i], xs[i + 1], args=(dA, dC), xtol=1e-9)
+            # prefer the least tilt change, and break ties toward no shift
+            cost = abs(tilt - wt_tilt) + 0.02 * (abs(dA) + abs(dC))
+            if best is None or cost < best[0]:
+                best = (cost, tilt, dA, dC)
+
+    if best is None:
+        return RigidResult(g, False, (0, 0), rA, float("nan"), float("nan"),
+                           2 * rA, float("nan"), float("nan"), 0.0, 0.0,
+                           [dict(bond="linker", needed=float("nan"),
+                                 threshold=RUPTURE_NM["linker-A"])])
+
+    _, tilt, dA, dC = best
+    A0 = rA * _u(0.0)
+    B0 = A0 + g.spacing_ab * _u(tilt)
+    C0 = A0 + LAC * _u(tilt)
+    outer = 2.0 * (max(np.linalg.norm(x) for x in (A0, B0, C0)) + Rt)
+
+    # can the triplet base still reach the linker vertex?
+    pC = C0 + Rt * _u(tilt + g.pf_angle("C", g.linkC_pf, dC))
+    A1 = _R(-step) @ A0
+    pA = A1 + Rt * _u(-step + tilt + g.pf_angle("A", g.linkA_pf, dA))
+    d = pA - pC
+    dist = max(float(np.linalg.norm(d)), 1e-9)
+    u = d / dist
+    perp = np.array([-u[1], u[0]])
+    aC, aA = g.linker_arm_C, g.linker_arm_A
+    x = (aC * aC - aA * aA + dist * dist) / (2 * dist)
+    h2 = aC * aC - x * x
+    if h2 < 0:                                  # arms cannot span the endpoints
+        vertex = pC + x * u
+    else:
+        h = float(np.sqrt(h2))
+        v1, v2 = pC + x * u + h * perp, pC + x * u - h * perp
+        # Two branches exist; the real vertex lies inboard of BOTH linker
+        # endpoints (|r| ~96.9 nm against 106.8 and 98.4), verified against the
+        # network solve.
+        vertex = v1 if np.linalg.norm(v1) < np.linalg.norm(v2) else v2
+    p_mid = np.array([g.hub_radius + g.spoke_rod - g.pinhead_span * 0.0, 0.0])
+    p_mid = (g.hub_radius + g.spoke_rod) * _u(0.0) + \
+            g.pinhead_span * (g.pinhead_base_frac[0] * _u(pin_dir)
+                              + g.pinhead_base_frac[1] * _u(pin_dir + 90))
+    # The triplet ring can sit rotated relative to the cartwheel (the network
+    # solve shows ~8 deg at wild type). That offset is a genuine degree of
+    # freedom, and it is what lets the base reach the linker vertex -- assuming
+    # it zero made the base look ~7 nm short even at wild type, where it fits.
+    def base_gap(phi):
+        v = _R(phi) @ vertex
+        return float(np.linalg.norm(v - p_mid)) - g.base_length
+
+    phi_off, need = 0.0, float(np.linalg.norm(vertex - p_mid))
+    lo_p, hi_p = -40.0, 40.0
+    xs = np.linspace(lo_p, hi_p, 400)
+    vs = [base_gap(x) for x in xs]
+    for i in range(len(xs) - 1):
+        if vs[i] * vs[i + 1] < 0:
+            cand = brentq(base_gap, xs[i], xs[i + 1], xtol=1e-9)
+            if abs(cand) < abs(phi_off) or phi_off == 0.0:
+                phi_off = cand
+    if phi_off != 0.0:
+        need = float(np.linalg.norm(_R(phi_off) @ vertex - p_mid))
+    else:
+        need = min(abs(v) + g.base_length for v in vs)   # closest achievable
+    bow = max(0.0, (g.base_length - need) / g.base_length) * 100.0
+    short = max(0.0, need - g.base_length)
+    rup = ([dict(bond="base-linker", needed=need, threshold=g.base_length
+                 + RUPTURE_NM["base-linker"])]
+           if short > RUPTURE_NM["base-linker"] else [])
+
+    return RigidResult(g, True, (dA, dC), rA, float(np.linalg.norm(C0)), outer,
+                       2 * rA, tilt, tilt - wt_tilt, bow, short, rup)
+
+
 DERIVED_PARAMS = {"N_both": "sets cartwheel AND triplet symmetry together",
                   "linker_length": "end-to-end A-C linker span; scales both arms",
                   "n_pf_A": "A-tubule protofilament count; also sets tubule radius",
