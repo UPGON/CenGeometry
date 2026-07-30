@@ -282,7 +282,7 @@ with st.sidebar:
                                       "neighbouring protofilaments to relieve strain. "
                                       "Solves 9 configurations, so it is ~9x slower.")
 
-    if st.button("Reset to wild type", use_container_width=True):
+    if st.button("Reset to wild type", width='stretch'):
         # widget values live in session_state, so they must be cleared too --
         # clearing only the cache would leave every control where it was
         for k in ("N_cw", "N_mt", "MTn", "spoke_rod", "base_length", "pinhead_span",
@@ -308,7 +308,7 @@ with tab_x:
                    "shown is its best attempt, so read the numbers with caution.")
     left, right = st.columns([1, 1.25])
     with left:
-        st.image(png, use_container_width=True)
+        st.image(png, width='stretch')
     with right:
         st.subheader("Size")
         c = st.columns(3)
@@ -392,7 +392,7 @@ with tab_scan:
                           help="Set automatically: one point per whole value.")
     else:
         n = int(c[3].number_input("Steps", 2, 40, 8, 1))
-    go = c[4].button("Run scan", type="primary", use_container_width=True)
+    go = c[4].button("Run scan", type="primary", width='stretch')
 
     if go or st.session_state.get("scan_done"):
         st.session_state["scan_done"] = True
@@ -428,7 +428,7 @@ with tab_scan:
             for col, (v, png) in zip(cols, thumbs[row_start:row_start + 4]):
                 vtxt = f"{int(v)}" if is_int else f"{v:g}"
                 d = df.loc[df[param] == v, "diameter_nm"]
-                col.image(png, use_container_width=True)
+                col.image(png, width='stretch')
                 col.caption(f"{label.split('(')[0].strip()} = **{vtxt}**"
                             + (f" · Ø {d.iloc[0]:.0f} nm" if len(d) else ""))
         st.divider()
@@ -485,7 +485,7 @@ with tab_scan:
                            "wild-type protofilaments were always lowest-strain.")
 
         with st.expander("Table of all metrics"):
-            st.dataframe(df, use_container_width=True, height=320)
+            st.dataframe(df, width='stretch', height=320)
         st.download_button("Download CSV", df.to_csv(index=False).encode(),
                            file_name=f"scan_{param}.csv", mime="text/csv")
 
@@ -585,7 +585,7 @@ with tab_grid:
                         family(gdf, px, py, GRID_METRICS[name], name, name, wt))
 
             with st.expander("Table of all metrics"):
-                st.dataframe(gdf, use_container_width=True, height=320)
+                st.dataframe(gdf, width='stretch', height=320)
             st.download_button("Download CSV", gdf.to_csv(index=False).encode(),
                                file_name=f"grid_{px}_vs_{py}.csv", mime="text/csv")
 

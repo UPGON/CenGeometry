@@ -5,9 +5,28 @@ predict how structural perturbations — SAS-6 mutations that change
 cartwheel symmetry, altered coiled-coil lengths, loss of the C-tubule —
 change the architecture of the whole organelle.
 
-**New here?** Double-click **`Launch CenGeometry.command`** (macOS) or
-**`Launch CenGeometry.bat`** (Windows). It sets everything up the first
-time and opens the interactive app in your browser — no terminal, no code.
+**New here?** Double-click the launcher for your platform:
+
+| Platform | File |
+|---|---|
+| **macOS** | `START HERE (Mac).command` |
+| **Windows** | `START HERE (Windows).bat` |
+
+It sets everything up the first time and opens the interactive app in your
+browser — no terminal, no code. Use only the file for your own platform:
+double-clicking the `.bat` on a Mac just opens it in a text editor.
+
+**First run on macOS** — Gatekeeper blocks unsigned scripts, so the very
+first launch needs **right-click → Open → Open** rather than a double-click.
+After that, double-clicking works normally.
+
+**If the Mac launcher won't run at all**, the executable permission has
+probably been stripped (Dropbox and some file transfers do this). Restore it
+once with:
+
+```bash
+chmod +x "START HERE (Mac).command"
+```
 
 For the command-line route instead, open
 [`QUICKSTART.html`](QUICKSTART.html) in a web browser.
@@ -237,7 +256,7 @@ could relieve strain by re-registering instead of deforming.
 ## Repository layout
 
 ```
-Launch CenGeometry.*     double-click launchers (macOS / Windows)
+START HERE (Mac).command / (Windows).bat   double-click launchers
 app.py                   interactive Streamlit app (start here)
 run_analysis.py          command-line entry point
 centriole_kinematic.py   the model

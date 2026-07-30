@@ -1,4 +1,9 @@
 @echo off
+REM ===========================================================
+REM   THIS FILE IS FOR WINDOWS ONLY.
+REM   On a Mac, double-click "START HERE (Mac).command" instead
+REM   -- a .bat will just open in a text editor and do nothing.
+REM ===========================================================
 REM Double-click this file to open CenGeometry in your web browser.
 REM First run takes a couple of minutes while it installs; after that it is quick.
 
