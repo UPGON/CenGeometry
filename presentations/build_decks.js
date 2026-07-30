@@ -150,7 +150,7 @@ function deckOne() {
   [["Nothing stretches", "Segments have fixed length. Under compression they may buckle — bow so the ends come closer — but never extend.", PURPLE],
    ["Bonds have strengths", "Each connection is a spring stiffened by its bond strength, so weak bonds yield first and load distribution is a result, not an assumption.", CYAN],
    ["Joints have individual limits", "A rotation means different things at a 45 nm spoke and a 13 nm linker arm. Each is graded against its own thresholds.", GREEN],
-   ["Parts cannot overlap", "Microtubules repel on contact; the clearance of every strand against every tubule is measured.", BLUE]
+   ["Connections cannot separate", "Each body is built onto the one that feeds it, so a connection point holds exactly \u2014 by construction, not by penalty.", BLUE]
   ].forEach(([h1, b, c], i) => {
     const x = 0.7 + (i % 2) * 6.15, y = 1.6 + Math.floor(i / 2) * 2.5;
     card(s, x, y, 5.75, 2.2);
@@ -158,8 +158,38 @@ function deckOne() {
     s.addText(h1, t("", { x: x + 0.95, y: y + 0.3, w: 4.5, h: 0.45, fontSize: 18, bold: true, color: c, fontFace: HEAD, margin: 0 }));
     s.addText(b, t("", { x: x + 0.35, y: y + 0.92, w: 5.1, h: 1.15, fontSize: 14, margin: 0 }));
   });
-  s.addText("Grades: OK (comfortable)  ·  HARD (strained but achievable)  ·  FORBIDDEN (very costly)",
+  s.addText("Grades: OK  ·  HARD  ·  SEVERE — assumed tolerances, not feasibility verdicts",
     t("", { x: 0.7, y: 6.65, w: 11.9, h: 0.4, fontSize: 14, bold: true, color: MUTE }));
+
+  // --- per-joint limits
+  s = p.addSlide();
+  head(s, "Every joint has its own tolerance", "HOW STRAIN IS GRADED");
+  s.addText("A rotation means different things at different connections. 15\u00b0 at the base of the " +
+    "45 nm spoke moves its tip 11.6 nm \u2014 a whole tubule radius \u2014 while the same angle at a " +
+    "13 nm linker arm moves it 3.4 nm. So each is graded against its own limits.",
+    t("", { x: 0.7, y: 1.42, w: 11.9, h: 0.75, fontSize: 15, color: MUTE }));
+  const jb = [
+    [{ text: "Joint / contact", options: { bold: true, color: WHITE, fill: { color: PURPLE } } },
+     { text: "OK", options: { bold: true, color: WHITE, fill: { color: PURPLE } } },
+     { text: "HARD", options: { bold: true, color: WHITE, fill: { color: PURPLE } } },
+     { text: "SEVERE", options: { bold: true, color: WHITE, fill: { color: PURPLE } } },
+     { text: "Why", options: { bold: true, color: WHITE, fill: { color: PURPLE } } }],
+    ["Linker to A-tubule", "8\u00b0", "8\u201320\u00b0", "> 20\u00b0", "grips a rigid, ordered lattice"],
+    ["Linker to C-tubule", "8\u00b0", "8\u201320\u00b0", "> 20\u00b0", "same lattice, slightly weaker bond"],
+    ["Pinhead to A-tubule", "10\u00b0", "10\u201322\u00b0", "> 22\u00b0", "lattice contact, larger footprint"],
+    ["Spoke vs radial", "15\u00b0", "15\u201335\u00b0", "> 35\u00b0", "many SAS-6 rings stack axially"],
+    ["Pinhead vs spoke", "15\u00b0", "15\u201330\u00b0", "> 30\u00b0", "multi-protein, three contacts"],
+    ["Triplet axis vs spoke", "20\u00b0", "20\u201340\u00b0", "> 40\u00b0", "a composite, not one interface"],
+    ["Base vs spoke", "20\u00b0", "20\u201340\u00b0", "> 40\u00b0", "designed to reorient"],
+  ];
+  s.addTable(jb, { x: 0.7, y: 2.3, w: 11.9, colW: [2.9, 1.0, 1.3, 1.2, 5.5], fontSize: 12.5,
+    fontFace: BODY, border: { type: "solid", color: "E3E0EC", pt: 1 }, rowH: 0.45, valign: "middle" });
+  card(s, 0.7, 5.9, 11.9, 1.3, "FFEBEE");
+  s.addText("These are assumed tolerances, NOT verdicts on feasibility. The values were reasoned, " +
+    "not measured. A SAS-6 spoke shortened by 17 nm builds real centrioles, yet the model grades its " +
+    "linker contacts SEVERE while reporting zero clashes and a perfectly buildable geometry. " +
+    "Read them as \u201chow far from wild type\u201d and judge from the geometry itself.",
+    t("", { x: 0.95, y: 6.05, w: 11.4, h: 1.05, fontSize: 13.5, color: "8E1B1B", margin: 0 }));
 
   // --- validation
   s = p.addSlide();
@@ -192,7 +222,7 @@ function deckOne() {
   const o = [
     [{ text: "Readout", options: { bold: true, color: WHITE, fill: { color: PURPLE } } },
      { text: "Biological meaning", options: { bold: true, color: WHITE, fill: { color: PURPLE } } }],
-    ["Joint rotation", "How far each connection had to turn, graded OK / HARD / FORBIDDEN against its own limits"],
+    ["Joint rotation", "How far each connection had to turn, graded OK / HARD / SEVERE against its own limits (assumed tolerances, not feasibility)"],
     ["Bond load", "Which connection carries most strain — i.e. which would rupture first"],
     ["Buckling", "Which segments were forced to bow because space became tight"],
     ["Clashes", "Microtubules overlapping in space. Anything above zero is physically impossible"],
@@ -239,15 +269,16 @@ function deckOne() {
   s.addText("What this model is not", { x: 0.9, y: 0.75, w: 11.5, h: 0.8, fontSize: 34,
     bold: true, color: WHITE, fontFace: HEAD });
   [["It is not a physics simulation", "It is a geometric and mechanical model for generating hypotheses. Bond strengths are a rank ordering, not measured energies."],
-   ["The joint thresholds are reasoned, not measured", "No sub-tomogram angular variance was available to calibrate OK / HARD / FORBIDDEN. Their rank ordering is defensible; the absolute numbers are not."],
+   ["The joint thresholds are reasoned, not measured", "No sub-tomogram angular variance was available to calibrate OK / HARD / SEVERE. Their rank ordering is defensible; the absolute numbers are not."],
    ["It is a single 2D cross-section", "The real centriole twists along its length. Anything longitudinal is outside its scope."],
+   ["Grades are not feasibility verdicts", "The tolerances were reasoned, not measured. Structures assemble in conditions graded SEVERE."],
    ["Calibration rests on one schematic", "Protofilament positions carry about 2° (~0.4 nm) of reading noise, which sets the precision floor."]
   ].forEach(([h1, b], i) => {
-    const y = 1.85 + i * 1.22;
-    s.addShape("roundRect", { x: 0.9, y, w: 11.5, h: 1.05, fill: { color: "2A1B4D" },
+    const y = 1.72 + i * 0.99;
+    s.addShape("roundRect", { x: 0.9, y, w: 11.5, h: 0.86, fill: { color: "2A1B4D" },
       line: { color: "2A1B4D" }, rectRadius: 0.06 });
-    s.addText(h1, t("", { x: 1.2, y: y + 0.1, w: 4.55, h: 0.85, fontSize: 16, bold: true, color: CYAN, margin: 0 }));
-    s.addText(b, t("", { x: 5.85, y: y + 0.13, w: 6.3, h: 0.8, fontSize: 13, color: "C9C4DB", margin: 0 }));
+    s.addText(h1, t("", { x: 1.2, y: y + 0.06, w: 4.55, h: 0.74, fontSize: 14.5, bold: true, color: CYAN, margin: 0 }));
+    s.addText(b, t("", { x: 5.85, y: y + 0.06, w: 6.3, h: 0.74, fontSize: 12, color: "C9C4DB", margin: 0 }));
   });
   s.addText("Used within those limits, it answers a question intuition cannot: given everything is connected, what has to give?",
     t("", { x: 0.9, y: 6.85, w: 11.5, h: 0.45, fontSize: 15, italic: true, color: CYAN }));
@@ -349,7 +380,7 @@ function deckTwo() {
   // --- fixable
   s = p.addSlide();
   head(s, "Fixable: the numbers behind the verdicts", "SECOND TIER");
-  [["Joint thresholds are invented", "OK / HARD / FORBIDDEN limits were reasoned, not measured. Tested: scaling all bands 0.5×–2× leaves the qualitative conclusion intact, but flips the spoke's label between OK and HARD. So the ranking is robust; the labels are not.", WARN],
+  [["Joint thresholds are invented", "OK / HARD / SEVERE limits were reasoned, not measured. Tested: scaling all bands 0.5×–2× leaves the qualitative conclusion intact, but flips the spoke's label between OK and HARD. So the ranking is robust; the labels are not.", WARN],
    ["Bond strengths are ordinal", "Six bonds carry values from 1.00 to 0.25 encoding only a rank order. The model then reports a specific “closest to rupture” bond and a numeric load. That precision is not supported by the input — only the ordering is.", WARN],
    ["No absolute energy scale", "Without bond energies in kT, nothing converts to a predicted fluctuation amplitude comparable with data. This is exactly what made the soft-mode analysis uninterpretable and led to it being abandoned.", WARN]
   ].forEach(([h1, b, c], i) => {
@@ -473,7 +504,7 @@ function deckThree() {
      { text: "What it unlocks", options: { bold: true, color: WHITE, fill: { color: PURPLE } } },
      { text: "Effort", options: { bold: true, color: WHITE, fill: { color: PURPLE } } }],
     ["1", "Hold-out validation", "Breaks the circularity. Predict a system never used in calibration, then measure it. Without this, no result is independently supported.", "High"],
-    ["2", "Bands from sub-tomogram variance", "Turns OK / HARD / FORBIDDEN from reasoned guesses into measured tolerances. The observed particle-to-particle spread IS the OK band.", "Medium"],
+    ["2", "Bands from sub-tomogram variance", "Turns OK / HARD / SEVERE from reasoned guesses into measured tolerances. The observed particle-to-particle spread IS the OK band.", "Medium"],
     ["3", "Bond energies in kT", "Enables forces, rupture predictions and fluctuation amplitudes. Explicitly the blocker that killed the soft-mode analysis.", "High"],
     ["4", "2.5D stack of coupled slices", "Several cross-sections at fixed axial spacing with a twist increment. Reaches longitudinal questions at a fraction of full-3D cost.", "Medium"],
     ["5", "Uncertainty propagation", "Resample inputs within their ~0.4 nm noise and report output ranges instead of point estimates.", "Low"],
