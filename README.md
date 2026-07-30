@@ -247,32 +247,6 @@ Less commonly: `pinhead_span`, `linker_length`, `MTn` (3/2/1 for
 triplet/doublet/singlet), `n_pf_A` (protofilament count, which also sets
 tubule radius).
 
-### Two solvers
-
-`solve()` gives every body a free pose and ties them with springs. That is
-what allows mismatched symmetries, but under a large perturbation it
-accommodates by opening those springs 1–3 nm — stretching by another name,
-which the model is supposed to forbid.
-
-`solve_rigid()` eliminates the redundant variables instead, so connections
-pivot but genuinely cannot extend. Symmetric configurations only, exact, and
-~0.3 s with no optimiser:
-
-```python
-from centriole_kinematic import Geometry, set_param, solve_rigid
-
-print(solve_rigid(Geometry()).report())
-print(solve_rigid(set_param(Geometry(), "spoke_rod", 28.03)).report())
-```
-
-It reports the A-ring and outer diameters, the triplet tilt, which
-protofilament register the A-C linker had to adopt, how far the triplet base
-had to bow, and any bond whose required extension exceeds its rupture limit.
-
-Use `solve_rigid()` for diameter predictions and `solve()` for symmetry
-mismatch. Where they disagree on a strongly perturbed geometry, trust the
-rigid one.
-
 Optional: `solve(..., register_shift=True)` lets the pinhead and linker
 contacts slide to neighbouring protofilaments, testing whether a mutant
 could relieve strain by re-registering instead of deforming.
