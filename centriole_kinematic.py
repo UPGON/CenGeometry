@@ -180,7 +180,15 @@ class Geometry:
     N_mt: int = 9                  # microtubule triplets
     MTn: int = 3                   # 3 = triplet, 2 = doublet, 1 = singlet
 
-    head_contact: float = 10.40    # head-head spacing on the hub ring
+    # NOTE ON PROVENANCE: unlike every other dimension here, this one is NOT
+    # measured by svg_calibration.py -- the schematic's centre is ambiguous
+    # (its drawn spokes sit at exactly 40 deg while its drawn triplets sit at
+    # 41.4 deg), so the hub radius cannot be read off it. It is instead FITTED:
+    # the value that lets the measured wild-type unit close with least strain.
+    # Re-derive it with calibrate_head_contact(); confirmed to sit at the
+    # minimum under the current network architecture (1.28 deg at 10.40, vs
+    # 1.63 at 10.0 and 2.02 at 11.0).
+    head_contact: float = 10.40    # head-head spacing on the hub ring (fitted)
     head_length: float = 4.98
     spoke_rod: float = 45.03
 
@@ -1130,6 +1138,37 @@ def blooming_scan(geom: Optional[Geometry] = None, n: int = 9,
             "n_clashes": sol.n_clashes,
         })
     return pd.DataFrame(rows)
+
+
+def calibrate_head_contact(geom: Optional[Geometry] = None,
+                           lo: float = 7.0, hi: float = 14.0, tol: float = 0.02,
+                           **kw) -> float:
+    """Re-derive the SAS-6 head-head spacing that minimises wild-type strain.
+
+    This is the one dimension that cannot be measured off the schematic, so
+    it is fitted instead: the hub radius follows from it as
+    ``d / (2 sin(pi/N))``, and the value chosen is the one that lets the
+    measured unit close with the least joint strain. Provided so the default
+    is reproducible rather than a magic number -- rerun it after any change
+    to the architecture or to the measured constants.
+
+    >>> calibrate_head_contact()          # doctest: +SKIP
+    10.4
+    """
+    base = geom if geom is not None else Geometry()
+
+    def strain(d):
+        sol = solve(set_param(base, "head_contact", float(d)), **kw)
+        return float(np.sqrt(np.mean([v["rms"] ** 2
+                                      for v in sol.joint_strain.values()])))
+
+    while hi - lo > tol:                     # golden-section on a 1-D objective
+        m1, m2 = lo + 0.382 * (hi - lo), lo + 0.618 * (hi - lo)
+        if strain(m1) < strain(m2):
+            hi = m2
+        else:
+            lo = m1
+    return round(0.5 * (lo + hi), 3)
 
 
 def band_sensitivity(geom: Optional[Geometry] = None,

@@ -115,6 +115,14 @@ Two findings worth noting: the B- and C-tubules carry 9 protofilaments at
 the **same 27.7° lattice pitch as the A-tubule's 13** (not 360/9), and the
 A-C linker is **bent, not straight**.
 
+**One value is fitted, not measured.** `head_contact` (the SAS-6 head-head
+spacing, which sets the hub radius) cannot be read off the schematic,
+because the drawing's centre is ambiguous — its spokes sit at exactly 40°
+apart while its triplets sit at 41.4°. It is instead fitted as the value
+that lets the measured wild-type unit close with least strain. Re-derive it
+with `calibrate_head_contact()`. Every other dimension in the table above
+comes straight from `svg_calibration.py`.
+
 **Calibration caveat.** Protofilament positions were read from label
 anchors in the SVG, which carries roughly ±2° (~0.4 nm) of noise. That sets
 the floor on how exactly wild type can be made to close, and is a
