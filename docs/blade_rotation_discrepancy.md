@@ -145,11 +145,13 @@ function first, which is why it is worth doing before any further modelling.
 - **Do not tune anything to fit this measurement.** One number agreeing does
   not validate a mechanism, and fitting to it would reintroduce exactly the
   circularity documented in the critical-evaluation deck.
-- `solve_chain` takes a fixed `reg=(pinhead, linkC)`; it does not search
-  registers. A search exists only in the older spring solver, which cannot be
-  trusted here because it opens its bonds 1–3 nm under this perturbation.
-  Adding a proper register search to the chain solver is the obvious next
-  piece of work.
+- The register search ranks by model cost, and **cost ranking is not
+  evidence** — it does not select the data-matching register. Always read the
+  whole `register_scan`, never just the returned winner.
+- The search takes ~240 s for 25 registers, far slower than a single solve,
+  because shifted registers converge less easily.
+- Never use `solve()` for this perturbation: it opens its bond springs 1–3 nm,
+  which visibly separates the spoke from the pinhead and corrupts the answer.
 
 ## Reproducing
 
