@@ -101,6 +101,41 @@ diameter is fitted from the ring. Peak-to-peak of a signal ring is not the
 outer wall envelope, and the ~24 nm wall may be unresolved at typical
 expansion factors.
 
+## Register search (added after the manual scan)
+
+`solve_chain(..., register_shift=True)` now searches both A-C linker contacts
+over +-2 protofilaments (25 combinations, ~240 s) and keeps every candidate in
+`register_scan`. Results for the 17 nm-shorter spoke:
+
+| Register (linker-A / linker-C) | Model cost | Outer change | Tilt change |
+|---|---|---|---|
+| +2 / +0 — *model's pick* | 127 | −28.26 nm | +6.19° |
+| +1 / +1 | 1,780 | −23.36 nm | +9.23° |
+| +0 / +2 | 3,372 | −27.04 nm | +3.45° |
+| +2 / +1 | 4,247 | −38.56 nm | −1.84° |
+| **+1 / −2 — *matches the data*** | **> 15,000** | **−34.20 nm** | **+4.47°** |
+| *measured* | — | *−34 nm* | — |
+
+**The register that reproduces the measurement is one the model strongly
+disfavours.** It reproduces −34 nm to within 0.2 nm and lets the blade nearly
+keep its tilt, but ranks outside the top eight on cost — roughly 100x the
+cheapest option.
+
+That is a genuine tension, and it has only two readings:
+
+1. **The cost function is wrong.** The joint bands and bond strengths are
+   reasoned heuristics, never measured. If they misprice a linker-contact
+   rotation, the ranking is meaningless and the +1/−2 register may be
+   perfectly ordinary. This is quite likely, and it is the same weakness the
+   critical-evaluation deck identifies as fundamental.
+2. **Re-registering is not the mechanism.** The register reproduces the
+   number, but if the model's energetics are even roughly right, the mutant
+   would not adopt this configuration, and something else explains the
+   measurement.
+
+The experiment below distinguishes these without needing to fix the cost
+function first, which is why it is worth doing before any further modelling.
+
 ## Caveats
 
 - The −2 register gives a slightly worse loop closure (0.203 nm against
@@ -123,9 +158,13 @@ from centriole_kinematic import Geometry, set_param
 from centriole_chain import solve_chain
 
 wt  = solve_chain(Geometry())
-mut = solve_chain(set_param(Geometry(), "spoke_rod", 28.03), reg=(0.0, -2.0))
-print(wt.outer_diameter, mut.outer_diameter)          # 255.0, 222.1
-print(mut.triplet_tilt - wt.triplet_tilt)             # +2.67 deg
+mut = solve_chain(set_param(Geometry(), "spoke_rod", 28.03), reg=(0, 1, -2))
+print(wt.outer_diameter, mut.outer_diameter)          # 255.0, 220.8
+print(mut.triplet_tilt - wt.triplet_tilt)             # +4.47 deg
+
+# or search, then read the whole ranking rather than the winner
+m = solve_chain(g, register_shift=True)
+for r in m.register_scan: print(r)
 ```
 
 Under a second each. Use `solve_chain`, never `solve`, for this perturbation.

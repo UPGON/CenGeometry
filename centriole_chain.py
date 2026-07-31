@@ -50,6 +50,12 @@ from centriole_kinematic import (
 )
 
 
+def _reg3(reg):
+    """Accept a 2-tuple (pinhead, linker-C) or a 3-tuple, return the 3-tuple."""
+    r = tuple(float(v) for v in reg)
+    return r if len(r) == 3 else (r[0], 0.0, r[1])
+
+
 @dataclass
 class ChainLayout:
     geom: Geometry
@@ -80,10 +86,14 @@ class ChainLayout:
         self.n_total = i
 
 
-def assemble_chain(z, g: Geometry, lay: ChainLayout, reg=(0.0, 0.0)) -> dict:
-    """Forward kinematics. Every tree edge is exact by construction."""
+def assemble_chain(z, g: Geometry, lay: ChainLayout, reg=(0.0, 0.0, 0.0)) -> dict:
+    """Forward kinematics. Every tree edge is exact by construction.
+
+    `reg` shifts each contact by whole protofilaments:
+    (pinhead on A, linker on A, linker on C).
+    """
     Rt = g.tubule_radius
-    pin_shift, linkC_shift = reg
+    pin_shift, linkA_shift, linkC_shift = _reg3(reg)
     a_spoke, a_pin = z[lay.i_spoke], z[lay.i_pin]
     a_trip, a_base = z[lay.i_trip], z[lay.i_base]
     th_link = z[lay.i_link]
@@ -98,7 +108,7 @@ def assemble_chain(z, g: Geometry, lay: ChainLayout, reg=(0.0, 0.0)) -> dict:
 
     ot = g.outer_tubule
     aA_pin = g.pf_angle("A", g.pin_pf, pin_shift)
-    aA_link = g.pf_angle("A", g.linkA_pf)
+    aA_link = g.pf_angle("A", g.linkA_pf, linkA_shift)
     aC_link = g.pf_angle(ot, g.linkC_pf, linkC_shift)
 
     T = [None] * lay.nm
@@ -228,7 +238,9 @@ class ChainSolution:
     max_overlap: float
     strand: dict
     unattached_triplets: list
-    reg: tuple = (0.0, 0.0)
+    reg: tuple = (0.0, 0.0, 0.0)
+    register_scan: list = field(default_factory=list)
+    cost: float = 0.0
     ruptured: list = field(default_factory=list)
     exact_bonds: tuple = ("pinhead-spoke", "pinhead-triplet", "base-pinhead", "linker-C")
 
@@ -248,6 +260,16 @@ class ChainSolution:
         L.append("  loop closures (the only ones that can open):")
         for k, v in sorted(self.bond_force.items(), key=lambda kv: -kv[1]["gap"]):
             L.append(f"      {k:<14}: gap {v['gap']:6.3f} nm")
+        if any(self.reg):
+            L.append(f"  register        : pinhead {self.reg[0]:+.0f} pf, "
+                     f"linker-A {self.reg[1]:+.0f} pf, linker-C {self.reg[2]:+.0f} pf")
+        if self.register_scan:
+            L.append("  register options, best model cost first "
+                     "(NOTE: lowest cost is not evidence -- compare against data):")
+            for r in self.register_scan[:5]:
+                L.append(f"      A{r['linkA']:+.0f}/C{r['linkC']:+.0f}  "
+                         f"cost {r['cost']:9.2f}  outer {r['outer']:7.2f} nm  "
+                         f"tilt {r['tilt']:+6.2f} deg")
         buck = {k: v for k, v in self.buckling.items() if abs(v) > 0.01}
         L.append("  buckling: " + (", ".join(f"{k} {v:.2f}%" for k, v in buck.items())
                                    if buck else "none"))
@@ -260,8 +282,47 @@ def solve_chain(geom: Optional[Geometry] = None, k_bond: float = 600.0,
                 k_angle: float = 0.25, k_buckle: float = 3.0,
                 k_steric: float = 30.0, k_uniform: float = 6.0,
                 max_buckle: float = 0.35, bands: Optional[dict] = None,
-                reg=(0.0, 0.0), max_nfev: int = 8000) -> ChainSolution:
-    """Solve with connection points held exactly wherever the topology allows.
+                reg=(0.0, 0.0, 0.0), max_nfev: int = 8000,
+                register_shift: bool = False,
+                shift_range=(-2, -1, 0, 1, 2)) -> ChainSolution:
+    """Solve, optionally searching protofilament registers.
+
+    With `register_shift=True` both A-C linker contacts are slid over
+    `shift_range` whole protofilaments (25 combinations by default, ~1 s
+    each) and the lowest-cost solution is returned. The pinhead contact
+    stays at whatever `reg[0]` specifies.
+
+    **The ranking is by model cost, which is not evidence.** Every candidate
+    is kept in `register_scan` precisely because the cheapest is often not
+    the interesting one: for a spoke shortened to 28 nm the model prefers
+    wild-type register, yet the shifted register is what reproduces the
+    measured diameter. Read the whole scan and compare against data rather
+    than trusting the winner.
+    """
+    if not register_shift:
+        return _solve_chain_once(geom, k_bond, k_angle, k_buckle, k_steric,
+                                 k_uniform, max_buckle, bands, reg, max_nfev)[0]
+
+    pin = _reg3(reg)[0]
+    best, scan = None, []
+    for dA in shift_range:
+        for dC in shift_range:
+            sol, cost = _solve_chain_once(geom, k_bond, k_angle, k_buckle,
+                                          k_steric, k_uniform, max_buckle, bands,
+                                          (pin, float(dA), float(dC)), max_nfev)
+            scan.append(dict(linkA=float(dA), linkC=float(dC), cost=cost,
+                             outer=sol.outer_diameter, tilt=sol.triplet_tilt,
+                             worst_gap=max(v["gap"] for v in sol.bond_force.values())))
+            if best is None or cost < best[1]:
+                best = (sol, cost)
+    scan.sort(key=lambda r: r["cost"])
+    best[0].register_scan = scan
+    return best[0]
+
+
+def _solve_chain_once(geom, k_bond, k_angle, k_buckle, k_steric, k_uniform,
+                      max_buckle, bands, reg, max_nfev):
+    """One solve at a fixed register. Returns (solution, least-squares cost).
 
     `k_bond` defaults to 600, which makes loop closure strictly dominate the
     angular penalties. That matters: the chain form has 45 pose unknowns
@@ -339,11 +400,13 @@ def solve_chain(geom: Optional[Geometry] = None, k_bond: float = 600.0,
         st["T"][i]["centres"]["A"][1], st["T"][i]["centres"]["A"][0])))
         for i in range(lay.nm)]))
 
-    return ChainSolution(
+    return (ChainSolution(
         geom=g, z=z, lay=lay, state=st, success=bool(out.success),
         outer_diameter=float(outer), a_ring_diameter=a_ring, lumen_diameter=lumen,
         triplet_tilt=tilt, joint_strain=strain, joint_bands=bnds, buckling=buckling,
         bond_force=bond, worst_bond=worst,
         n_clashes=int((ov > 1e-6).sum()), max_overlap=float(ov.max()) if ov.size else 0.0,
         strand=strand_clearances(st, g, lay),
-        unattached_triplets=sorted(lay.free_trips), reg=reg)
+        unattached_triplets=sorted(lay.free_trips), reg=_reg3(reg),
+        cost=float(out.cost)),
+        float(out.cost))
