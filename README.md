@@ -273,10 +273,16 @@ legacy/                  the original MATLAB script and earlier ports
 results/                 generated output (not tracked by git)
 ```
 
-`docs/` also holds notes on two parked investigations —
-[blooming / iris motion](docs/blooming_handoff.md) and
-[soft-mode analysis](docs/parked_soft_modes.md) — each self-contained so it
-can be resumed without re-deriving anything.
+`docs/` holds self-contained notes on three investigations, each resumable
+without re-deriving anything:
+
+- [**A-C linker register**](docs/blade_rotation_discrepancy.md) — *live.* A
+  measured mutant disagreed with the model until the linker was allowed to
+  re-register; now a specific cryo-ET-testable prediction.
+- [blooming / iris motion](docs/blooming_handoff.md) — parked on the 2D
+  limitation.
+- [soft-mode analysis](docs/parked_soft_modes.md) — parked as
+  uninterpretable without an absolute energy scale.
 
 `legacy/` holds the original MATLAB `centriole.m` this project grew from,
 plus two intermediate Python models. They are superseded by
