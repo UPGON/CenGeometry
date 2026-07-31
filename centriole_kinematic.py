@@ -769,11 +769,13 @@ def draw(sol: Solution, ax=None, show_pf_labels=False, title=None):
                 solid_capstyle="round", zorder=2)
     for i in range(lay.nm):
         L = st["L"][i]
-        # zorder 5 puts the linker ABOVE the protofilaments (zorder 4). Drawn
-        # below them, its last few nm vanished behind the grey circles and read
-        # as the arm passing through the tubule, when it is only attaching to it.
+        # Drawn BELOW the protofilaments (zorder 4) by preference, so its last
+        # few nm tuck behind them at the binding site. That can read as the arm
+        # passing through the tubule -- it is not: the arms leave their
+        # attachment pointing outward and no part lies inside any tubule.
+        # Penetration is caught numerically by strand_clearances(), not by eye.
         ax.plot(*np.c_[L["end_C"], L["vertex"], L["end_A"]], color=COLOR_LINKER, lw=5,
-                solid_capstyle="round", solid_joinstyle="round", zorder=5)
+                solid_capstyle="round", solid_joinstyle="round", zorder=2)
 
     ov = tubule_overlaps(st, g, lay)
     P, unit, _ = tubule_positions(st, g, lay)
