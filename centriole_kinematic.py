@@ -469,17 +469,25 @@ def strand_clearances(st, g: Geometry, lay: Layout):
     ot_idx = g.MTn - 1          # index of the outer tubule the linker binds
     res = {}
 
+    ATTACH_SKIP = 3.0          # nm of strand next to a binding site to ignore
+
     def scan(segments, exclude_per_seg):
-        """Exclusions are (unit, tubule_index) pairs -- only the tubules a
-        strand genuinely binds are ignored, so a strand cutting across a
-        *different* tubule of the same triplet is still caught."""
+        """Clearance of each strand against every microtubule.
+
+        A strand legitimately touches the tubules it binds, so the first
+        `ATTACH_SKIP` nm at each end is trimmed before measuring rather than
+        excluding those tubules wholesale. Excluding them entirely (the
+        previous behaviour) meant a strand cutting straight through its own
+        attachment tubule would have been reported as perfectly clear."""
         best, over, worst = np.inf, 0.0, None
         for (a, b), excl in zip(segments, exclude_per_seg):
+            a, b = np.asarray(a, float), np.asarray(b, float)
+            v = b - a
+            L = float(np.linalg.norm(v))
+            if L > 2 * ATTACH_SKIP + 0.2:      # trim both ends, keep the middle
+                u_ = v / L
+                a, b = a + ATTACH_SKIP * u_, b - ATTACH_SKIP * u_
             keep = np.ones(len(P), bool)
-            for (uu, tt) in excl:
-                keep &= ~((unit == uu) & (tub == tt))
-            if not keep.any():
-                continue
             d = _seg_point_dist(a, b, P[keep]) - Rt
             k = int(np.argmin(d))
             if float(d[k]) < best:
@@ -761,8 +769,11 @@ def draw(sol: Solution, ax=None, show_pf_labels=False, title=None):
                 solid_capstyle="round", zorder=2)
     for i in range(lay.nm):
         L = st["L"][i]
+        # zorder 5 puts the linker ABOVE the protofilaments (zorder 4). Drawn
+        # below them, its last few nm vanished behind the grey circles and read
+        # as the arm passing through the tubule, when it is only attaching to it.
         ax.plot(*np.c_[L["end_C"], L["vertex"], L["end_A"]], color=COLOR_LINKER, lw=5,
-                solid_capstyle="round", solid_joinstyle="round", zorder=2)
+                solid_capstyle="round", solid_joinstyle="round", zorder=5)
 
     ov = tubule_overlaps(st, g, lay)
     P, unit, _ = tubule_positions(st, g, lay)
