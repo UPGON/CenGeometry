@@ -84,7 +84,8 @@ def wt_metrics() -> dict:
 
 @st.cache_data(show_spinner=False, max_entries=128)
 def thumbnail(p: tuple, register_shift: bool = False) -> bytes:
-    """Small cross-section render, for the strip above the scan plots."""
+    """Small cross-section render for the scan strip. Never searches registers
+    (25x the cost per point would make a scan unusable)."""
     sol = solve(make_geometry(p))
     fig, ax = plt.subplots(figsize=(3.1, 3.1))
     draw(sol, ax=ax, title="")
@@ -97,14 +98,14 @@ def thumbnail(p: tuple, register_shift: bool = False) -> bytes:
 
 @st.cache_data(show_spinner=False, max_entries=256)
 def run_one(p: tuple, register_shift: bool):
-    """Solve one configuration. Returns (metrics, report text, figure PNG)."""
-    sol = solve(make_geometry(p))
+    """Solve one configuration. Returns (metrics, report, PNG, register scan)."""
+    sol = solve(make_geometry(p), register_shift=register_shift)
     fig, ax = plt.subplots(figsize=(7.2, 7.2))
     draw(sol, ax=ax)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=140, bbox_inches="tight")
     plt.close(fig)
-    return summarise(sol), sol.report(), buf.getvalue()
+    return summarise(sol), sol.report(), buf.getvalue(), list(sol.register_scan)
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
@@ -282,11 +283,12 @@ with st.sidebar:
                              help="Also sets the tubule radius: R = n · 5.747 / 2π nm.")
 
     register_shift = st.checkbox(
-        "Allow protofilament register shift", key="register_shift", value=False,
-        disabled=True,
-        help="Not available with the current solver, which holds connection "
-             "points together by construction. The register search existed only "
-             "in the older spring-based solver, which allowed parts to separate.")
+        "Search protofilament registers", key="register_shift", value=False,
+        help="Slide both A-C linker contacts over +-2 protofilaments (25 "
+             "combinations) and rank them. SLOW: about 4 minutes, versus ~1 s "
+             "without. Applies to the Cross-section tab only — a scan or grid "
+             "would multiply by 25. Read the whole ranking, not just the "
+             "winner: the cheapest register is not necessarily the right one.")
 
     def _reset_to_wt():
         # Must run as an on_click callback: it fires BEFORE the script re-runs,
@@ -309,7 +311,7 @@ tab_x, tab_scan, tab_grid, tab_help = st.tabs(
 # ---------------------------------------------------------------- cross-section
 with tab_x:
     with st.spinner("Solving…"):
-        m, report, png = run_one(PARAMS, register_shift)
+        m, report, png, reg_scan = run_one(PARAMS, register_shift)
 
     if not m["converged"]:
         st.warning("The solver did not fully converge at these values — the geometry "
@@ -349,21 +351,28 @@ with tab_x:
 
         st.markdown(f"Closest to rupture: **{m['worst_bond']}** "
                     f"(load {m['worst_bond_force']:.3f})")
-
-        if register_shift:
-            rp, rc = m["reg_pinhead_pf"], m["reg_linkerC_pf"]
-            if rp == 0 and rc == 0:
-                st.info("**Register shift: none chosen.** Staying on the wild-type "
-                        "protofilaments was already the lowest-strain option, so "
-                        "re-registering would not help here.")
-            else:
-                st.info(f"**Register shift chosen:** pinhead {rp:+.0f} protofilament(s) "
-                        f"on the A-tubule, linker {rc:+.0f} on the C-tubule. "
-                        "The structure relieves strain by binding a different "
-                        "protofilament rather than by deforming.")
         st.caption(f"Clearance vs microtubules — linker {m['linker_clear_nm']} nm, "
                    f"base {m['base_clear_nm']} nm, spoke {m['spoke_clear_nm']} nm. "
                    f"Negative means passing through one.")
+
+        if register_shift and reg_scan:
+            best = reg_scan[0]
+            st.info(f"**Lowest-cost register:** linker-A {best['linkA']:+.0f} pf, "
+                    f"linker-C {best['linkC']:+.0f} pf \u2014 outer "
+                    f"{best['outer']:.1f} nm. Lowest cost is **not** evidence; "
+                    "compare the whole table below against your data.")
+            rdf = pd.DataFrame(reg_scan)
+            rdf = rdf.rename(columns={"linkA": "linker-A (pf)", "linkC": "linker-C (pf)",
+                                      "cost": "model cost", "outer": "outer \u00d8 (nm)",
+                                      "tilt": "triplet tilt (deg)",
+                                      "worst_gap": "worst gap (nm)"})
+            with st.expander(f"All {len(reg_scan)} registers, cheapest first", expanded=True):
+                st.dataframe(rdf.round(3), width='stretch', height=240)
+                st.caption("The register that best matches a measurement is often "
+                           "not the cheapest. Judge by the diameter and tilt columns "
+                           "against your own data.")
+        elif register_shift:
+            st.info("Register search returned no alternatives.")
 
     st.divider()
     a, b = st.columns(2)
