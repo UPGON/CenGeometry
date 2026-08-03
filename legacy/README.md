@@ -6,7 +6,7 @@ none of it is maintained.
 
 | File | What it is |
 |---|---|
-| `centriole.m` | The original MATLAB script this project grew from. Draws a parametric centriole cross-section and searches for the blade tilt angle that matches a target A-C linker length. |
+| `centriole.m` | The original MATLAB script, written by **Aitana Neves** — the code this project grew from. Draws a parametric centriole cross-section and searches for the blade tilt angle that matches a target A-C linker length. |
 | `centriole.py` | A faithful Python port of `centriole.m`, preserving its behaviour (including several of its quirks) so results could be compared directly. |
 | `centriole_v2.py` | First attempt at an anatomically explicit model — splits the single lumped `r` into CID, cartwheel, pinhead and triplet base. Still a parametric drawing rather than a mechanical model. |
 | `perturbation.py` | Sweep and comparison helpers written against `centriole.py` / `centriole_v2.py`. |

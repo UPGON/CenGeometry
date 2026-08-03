@@ -350,9 +350,9 @@ without re-deriving anything:
 - [soft-mode analysis](docs/parked_soft_modes.md) — parked as
   uninterpretable without an absolute energy scale.
 
-`legacy/` holds the original MATLAB `centriole.m` this project grew from,
-plus two intermediate Python models. They are superseded by
-`centriole_kinematic.py` and kept only for provenance.
+`legacy/` holds the original MATLAB `centriole.m` written by Aitana Neves,
+which this project grew from, plus two intermediate Python models. They are
+superseded by `centriole_kinematic.py` and kept only for provenance.
 
 ---
 

@@ -1,5 +1,17 @@
 function [success overlap b_deg] = centriole(SYM,LK,CW_RADIUS,r,L,MTn,MT_RADIUS,GAMMA,CORRECT_OVERLAP,show_result)
 
+% CENTRIOLE  Parametric centriole cross-section.
+%
+%   The original script, written by Aitana Neves. This is the code the whole
+%   project grew from: it draws a parametric centriole cross-section and
+%   searches for the blade tilt angle that matches a target A-C linker
+%   length.
+%
+%   Kept for provenance and not maintained. Superseded by
+%   ../centriole_kinematic.py and ../centriole_chain.py, which solve for the
+%   least-strained arrangement of rigid bodies rather than drawing a shape
+%   from parameters. See ../legacy/README.md for why it was replaced.
+
 % PARAMETERS --------------------------------------------------------------
     if nargin < 1
        clear all; clc; close all;
@@ -184,7 +196,7 @@ function [success overlap b_deg] = centriole(SYM,LK,CW_RADIUS,r,L,MTn,MT_RADIUS,
     end
     
     % display the result
-    disp(['Obtained LK: ',num2str(LKm),' with an angle beta = ',num2str(b_deg+90),'°.']);
+    disp(['Obtained LK: ',num2str(LKm),' with an angle beta = ',num2str(b_deg+90),'ï¿½.']);
     
 end
     
