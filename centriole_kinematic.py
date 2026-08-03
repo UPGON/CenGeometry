@@ -116,11 +116,72 @@ JOINT_BANDS = {
 #: Rest orientation of each strand within the body frame of the tubule it
 #: grips (degrees), taken from the wild-type solution of the measured
 #: geometry. Deviation from these is what the contact bands penalise.
+#:
+#: These are stated for the wild-type protofilament. A contact that slides to
+#: a neighbouring protofilament must have its rest orientation slid with it --
+#: see :func:`contact_rest`.
 CONTACT_REST = {"linker-A": -13.199, "linker-C": -53.199, "pinhead-A": 77.394}
 
 W_FREE, W_HARD, W_FORBID = 1.0, 5.0, 30.0
 
 PF1_ANCHOR = {"A": -43.131, "B": 123.036, "C": 110.525}
+
+#: How much of a strand next to a binding site is exempt from the steric
+#: check (nm). A strand legitimately touches the tubule it binds, so the last
+#: stretch before the contact cannot be penalised -- but only against *that*
+#: tubule, and only within this radius of the contact point.
+#:
+#: The value has to sit between two limits. It must exceed the strand's own
+#: half-width, or a perfectly head-on approach would penalise itself. It must
+#: stay small enough that an arm running *along* the wall is still caught: a
+#: tangential strand clears the surface by only ``s^2 / 2R``, which at the
+#: tubule radius is 0.26 nm at s = 2.5 nm -- well inside the strand's width.
+#: 2.5 nm satisfies both with room to spare in each direction.
+ATTACH_CLEAR = 2.5
+
+#: Below this approach cosine a contact is reported as a graze rather than a
+#: clean head-on binding -- see :func:`contact_approach`. Wild type sits at
+#: 0.72 (linker on A) and 1.00 (linker on C), so this leaves wild type clear.
+APPROACH_GRAZING = 0.25
+
+#: How much strand-into-tubule overlap to forgive before calling it a clash
+#: (nm). The protofilament angles are read off the schematic with about +-2 deg
+#: (~0.4 nm) of noise, so demanding exactly zero would reject configurations on
+#: measurement error alone. Used both by the drawing and by the register
+#: search, so what is drawn as clashing is what is rejected as infeasible.
+CLEAR_TOL = 0.05
+
+
+def _reg3(reg):
+    """Accept a 2-tuple (pinhead, linker-C) or a 3-tuple, return the 3-tuple.
+
+    The three entries are the protofilament shifts of the pinhead contact on
+    the A-tubule, the linker's contact on the A-tubule, and the linker's
+    contact on the outer tubule. The 2-tuple form is the older network
+    solver's, which could not shift the linker's A-contact.
+    """
+    r = tuple(float(v) for v in reg)
+    return r if len(r) == 3 else (r[0], 0.0, r[1])
+
+
+def contact_rest(name: str, g: "Geometry", shift: float = 0.0) -> float:
+    """Rest orientation of a strand at a contact shifted by `shift` filaments.
+
+    :data:`CONTACT_REST` is measured in the body frame of the tubule, and
+    ``Geometry.pf_angle`` places protofilament *i + shift* at
+    ``PF1_ANCHOR - pf_pitch * (i - 1 + shift)``. So sliding a contact by one
+    protofilament rotates the binding site by ``-pf_pitch`` in that frame, and
+    a strand making *the same* interaction one filament round must arrive
+    rotated by the same amount.
+
+    Leaving the rest angle at its wild-type value instead -- which is what the
+    register search used to do -- charges every shifted register a spurious
+    ``pf_pitch`` (27.7 deg) of deviation. That is past the 20 deg HARD limit on
+    both linker contacts before the structure has moved at all, so the search
+    ranked registers by bookkeeping rather than by strain, and drove the arms
+    into tangential approaches that read as clashes in the drawing.
+    """
+    return CONTACT_REST[name] - g.pf_pitch * shift
 
 
 def _u(deg):
@@ -209,9 +270,22 @@ class Geometry:
     base_length: float = 34.68
     base_thickness: float = 2.23
 
+    # NOTE ON PROVENANCE: the two arm lengths and the vertex angle are read
+    # off the schematic by hand, not by svg_calibration.py, which measures
+    # only where the linker attaches. Treat them as less firmly grounded than
+    # the rest of the table.
     linker_arm_C: float = 14.64
     linker_arm_A: float = 11.64
     linker_vertex_deg: float = 138.7
+
+    # Half-thickness of a modelled strand, in nm. ASSUMED, not measured: 1 nm
+    # is half the diameter of a two-stranded coiled coil, which is what the
+    # A-C linker arms and the SAS-6 rod are. (The triplet base has a measured
+    # thickness -- `base_thickness` -- and uses half of that instead.) Nothing
+    # kinematic depends on this: it enters only the clearance report and the
+    # steric term, and strand_clearances() reports centreline clearance
+    # alongside so the assumption can always be backed out.
+    strand_half_width: float = 1.0
 
     rest_spoke: float = 0.0
     rest_pinhead: float = 21.5
@@ -284,10 +358,16 @@ class Geometry:
 # --------------------------------------------------------------------------
 # Body-local geometry
 # --------------------------------------------------------------------------
-def _triplet_local(g: Geometry, reg=(0.0, 0.0)):
-    """Points on a triplet, in its own frame (origin A centre, +x = axis)."""
+def _triplet_local(g: Geometry, reg=(0.0, 0.0, 0.0)):
+    """Points on a triplet, in its own frame (origin A centre, +x = axis).
+
+    `reg` is a register shift, in whole protofilaments, of each of the three
+    contacts -- see :func:`_reg3`. The linker's A-contact used to be the one
+    exception here, held at wild type whatever was asked for; it now shifts
+    like the other two, so both solvers mean the same thing by `reg`.
+    """
     Rt = g.tubule_radius
-    pin_shift, linkC_shift = reg
+    pin_shift, linkA_shift, linkC_shift = _reg3(reg)
     pts = {
         "A": np.zeros(2),
         "B": np.array([g.spacing_ab, 0.0]),
@@ -297,7 +377,7 @@ def _triplet_local(g: Geometry, reg=(0.0, 0.0)):
     return dict(
         centres=pts,
         A_pf34=Rt * _u(g.pf_angle("A", g.pin_pf, pin_shift)),
-        A_pf8=Rt * _u(g.pf_angle("A", g.linkA_pf)),
+        A_pf8=Rt * _u(g.pf_angle("A", g.linkA_pf, linkA_shift)),
         C_pf89=pts[ot] + Rt * _u(g.pf_angle(ot, g.linkC_pf, linkC_shift)),
     )
 
@@ -403,7 +483,7 @@ def bond_gaps(st, g: Geometry, lay: Layout):
             for k, v in out.items()}
 
 
-def joint_deviations(st, g: Geometry, lay: Layout):
+def joint_deviations(st, g: Geometry, lay: Layout, reg=(0.0, 0.0, 0.0)):
     """Deviation of each joint from its wild-type rest angle (degrees)."""
     dev = {"spoke": _wrap(st["spoke_dir"] - np.arange(g.N_cw) * 360.0 / g.N_cw - g.rest_spoke)}
     pin, trip, base = [], [], []
@@ -415,25 +495,28 @@ def joint_deviations(st, g: Geometry, lay: Layout):
     dev["pinhead"] = np.array(pin) if pin else np.zeros(0)
     dev["triplet"] = np.array(trip) if trip else np.zeros(0)
     dev["base"] = np.array(base) if base else np.zeros(0)
-    dev.update(contact_deviations(st, g, lay))
+    dev.update(contact_deviations(st, g, lay, reg))
     return dev
 
 
-def contact_deviations(st, g: Geometry, lay: Layout):
+def contact_deviations(st, g: Geometry, lay: Layout, reg=(0.0, 0.0, 0.0)):
     """Rotation of each strand within the frame of the tubule it grips.
 
     Microtubules are effectively rigid, so what matters at these contacts
     is how far the strand has twisted relative to the lattice it binds --
-    measured in the tubule's own body frame and compared to
-    :data:`CONTACT_REST`.
+    measured in the tubule's own body frame and compared to the rest angle
+    of whichever protofilament it is on, via :func:`contact_rest`.
     """
     nm = lay.nm
     prev = (np.arange(nm) - 1) % nm
-    lA = np.array([_wrap(st["L"][i]["theta"] - st["trip"][prev[i]][2] - CONTACT_REST["linker-A"])
+    pin_s, dA, dC = _reg3(reg)
+    rA, rC = contact_rest("linker-A", g, dA), contact_rest("linker-C", g, dC)
+    rP = contact_rest("pinhead-A", g, pin_s)
+    lA = np.array([_wrap(st["L"][i]["theta"] - st["trip"][prev[i]][2] - rA)
                    for i in range(nm)])
-    lC = np.array([_wrap(st["L"][i]["theta"] - st["trip"][i][2] - CONTACT_REST["linker-C"])
+    lC = np.array([_wrap(st["L"][i]["theta"] - st["trip"][i][2] - rC)
                    for i in range(nm)])
-    pA = np.array([_wrap(st["P"][p]["theta"] - st["trip"][t][2] - CONTACT_REST["pinhead-A"])
+    pA = np.array([_wrap(st["P"][p]["theta"] - st["trip"][t][2] - rP)
                    for p, (j, t) in enumerate(lay.pairs)]) if lay.pairs else np.zeros(0)
     return {"linker-A": lA, "linker-C": lC, "pinhead-A": pA}
 
@@ -455,73 +538,228 @@ def tubule_overlaps(st, g, lay):
     return np.where(diff, np.maximum(0.0, 2 * g.tubule_radius - d[iu]), 0.0)
 
 
+def _strand_segments(st, g: Geometry, lay: Layout):
+    """Every modelled strand, as the records the steric checks share.
+
+    Yields ``(kind, a, b, half_width, attach)``. `attach` maps the index of a
+    tubule this segment legitimately binds -- indexed into
+    :func:`tubule_positions`'s ``P`` -- to which end of the segment does the
+    binding (0 = `a`, 1 = `b`). Everything else is a tubule the strand has no
+    business touching.
+    """
+    nm = lay.nm
+    prev = (np.arange(nm) - 1) % nm
+    ot_idx = g.MTn - 1                     # the outer tubule the linker binds
+    w = g.strand_half_width
+
+    def flat(t_i, u):                      # index into tubule_positions()'s P
+        return t_i * nm + u
+
+    segs = []
+    for i in range(nm):
+        L = st["L"][i]
+        segs.append(("linker", L["end_C"], L["vertex"], w, {flat(ot_idx, i): 0}))
+        segs.append(("linker", L["vertex"], L["end_A"], w, {flat(0, prev[i]): 1}))
+    for B in st["B"]:
+        segs.append(("base", B["pin_end"], B["link_end"], 0.5 * g.base_thickness, {}))
+    # every spoke, not only the paired ones -- an unpaired spoke still has to
+    # fit somewhere, and with N_cw > N_mt some spokes have no pairing at all
+    for j in range(g.N_cw):
+        segs.append(("spoke", st["head"][j], st["spoke_tip"][j], w, {}))
+    return segs
+
+
+def _seg_point_matrix(A, B, P):
+    """Distance from every point in P to every segment in (A, B).
+
+    Vectorised over both axes -- this runs inside the residual, so a Python
+    loop over ~60 segments x ~27 tubules made a solve tens of times slower.
+    """
+    AB = B - A                                       # (S, 2)
+    L2 = np.einsum("ij,ij->i", AB, AB)               # (S,)
+    AP = P[None, :, :] - A[:, None, :]               # (S, T, 2)
+    t = np.einsum("stj,sj->st", AP, AB) / np.maximum(L2, 1e-12)[:, None]
+    t = np.clip(t, 0.0, 1.0)
+    t = np.where(L2[:, None] < 1e-12, 0.0, t)        # degenerate segment
+    proj = A[:, None, :] + t[:, :, None] * AB[:, None, :]
+    return np.linalg.norm(P[None, :, :] - proj, axis=-1)
+
+
+def strand_gap_matrix(st, g: Geometry, lay: Layout):
+    """Surface-to-surface gap of every strand against every microtubule.
+
+    Returns ``(gaps, kinds, labels)`` where `gaps` is ``(n_strand, n_tubule)``,
+    negative wherever a strand is inside a tubule wall. The strand's own
+    half-width counts, so a strand merely *grazing* a wall registers as an
+    overlap -- which is the point. A register that makes an arm arrive
+    tangentially rather than head-on leaves the centreline outside the tubule
+    by a whisker, and the old centreline-only check called that perfectly clear.
+
+    Near a genuine binding site the strand must be allowed to touch, so
+    :data:`ATTACH_CLEAR` nm is exempted -- but only against the tubule it
+    actually binds, and only at the end that binds it. The previous version
+    trimmed both ends of every segment against every tubule, which threw away
+    more than half of an 11.6 nm linker arm and hid exactly the grazing
+    approaches this is meant to catch.
+    """
+    P, unit, tub = tubule_positions(st, g, lay)
+    segs = _strand_segments(st, g, lay)
+    if not segs or not len(P):
+        return np.zeros((0, 0)), [], []
+    A = np.array([s[1] for s in segs], dtype=float)
+    B = np.array([s[2] for s in segs], dtype=float)
+    W = np.array([s[3] for s in segs], dtype=float)
+    kinds = [s[0] for s in segs]
+
+    gaps = _seg_point_matrix(A, B, P) - g.tubule_radius - W[:, None]
+
+    # Re-measure the attached pairs on a segment shortened away from the site.
+    si = [(i, k, which) for i, s in enumerate(segs) for k, which in s[4].items()]
+    if si:
+        idx = np.array([r[0] for r in si])
+        tk = np.array([r[1] for r in si])
+        end = np.array([r[2] for r in si])
+        a, b = A[idx], B[idx]
+        v = b - a
+        L = np.linalg.norm(v, axis=1)
+        u_ = v / np.maximum(L, 1e-12)[:, None]
+        keep = L > ATTACH_CLEAR + 1e-9
+        a2 = np.where((end == 0)[:, None], a + ATTACH_CLEAR * u_, a)
+        b2 = np.where((end == 1)[:, None], b - ATTACH_CLEAR * u_, b)
+        d = np.linalg.norm(P[tk] - _closest_on_seg(a2, b2, P[tk]), axis=1)
+        gaps[idx, tk] = np.where(keep, d - g.tubule_radius - W[idx], np.inf)
+
+    labels = [f"{TUBULES[tub[k]]}{unit[k]}" for k in range(len(P))]
+    return gaps, kinds, labels
+
+
+def _closest_on_seg(A, B, P):
+    """Closest point on each segment (A[i], B[i]) to the matching point P[i]."""
+    AB = B - A
+    L2 = np.maximum(np.einsum("ij,ij->i", AB, AB), 1e-12)
+    t = np.clip(np.einsum("ij,ij->i", P - A, AB) / L2, 0.0, 1.0)
+    return A + t[:, None] * AB
+
+
+#: Width of the quadratic rounding on the strand-overlap hinge (nm). See
+#: :func:`_soft_hinge`.
+HINGE_EPS = 0.1
+
+
+def _soft_hinge(x, eps=HINGE_EPS):
+    """max(0, x), rounded off over the first `eps` so the derivative exists.
+
+    A hard hinge is only C0, and the solver builds its Jacobian by finite
+    differences, so a residual sitting near the kink makes it chatter: at the
+    wild-type register with a 28 nm spoke the strand-overlap term took the
+    solve from 36 function evaluations to 1522, a 100x slowdown, for the same
+    answer to five figures. Rounding the corner over 0.1 nm costs at most
+    0.05 nm of accuracy -- an eighth of the calibration noise on the
+    protofilament angles -- and restores the original iteration count.
+    """
+    x = np.asarray(x, dtype=float)
+    return np.where(x <= 0.0, 0.0,
+                    np.where(x < eps, 0.5 * x * x / eps, x - 0.5 * eps))
+
+
+def strand_overlaps(st, g: Geometry, lay: Layout):
+    """Depth by which each strand is inside a microtubule wall (0 where clear).
+
+    This is the residual form of :func:`strand_gap_matrix`, so the solver can
+    be told to keep strands out of microtubules. Until it was added,
+    strand-tubule penetration was measured and reported but never penalised,
+    leaving nothing to stop a solve routing the A-C linker along -- or
+    through -- a tubule wall to reach a shifted protofilament.
+
+    Expect it to act as a guard rather than as a driver. In the chain
+    formulation both ends of the A-C linker are fixed by construction, so a
+    straight arm between them has no freedom left and its clearance follows
+    entirely from where the two contacts sit: raising the weight a
+    hundredfold moves a forced overlap by hundredths of a nanometre. It earns
+    its place where slack does exist -- unparented triplets, the triplet base,
+    the spoke -- and, above all, by making the overlap a number the register
+    search can reject on.
+    """
+    gaps, _, _ = strand_gap_matrix(st, g, lay)
+    if not gaps.size:
+        return np.zeros(0)
+    return _soft_hinge(-np.nan_to_num(gaps, posinf=0.0)).ravel()
+
+
+def contact_approach(st, g: Geometry, lay: Layout):
+    """How squarely each strand arrives at the protofilament it binds.
+
+    The cosine of the angle between the strand's incoming direction and the
+    outward surface normal at its contact: +1 is head-on from outside the
+    tubule, 0 is a tangential graze along the wall, and negative means the
+    strand reaches its site from *inside*, which no real strand can do.
+
+    Reported because nothing else in the model distinguishes a reachable
+    protofilament from an unreachable one. A register search is free to slide
+    a contact right round to the far side of a tubule; the cost function sees
+    only angles and gaps, so it will happily return a configuration the
+    structure could never adopt.
+    """
+    nm = lay.nm
+    prev = (np.arange(nm) - 1) % nm
+    ot = g.outer_tubule
+    out = {}
+
+    def cos_at(tip, arrival_from, centre):
+        # n points out of the tubule at the contact; d is the strand's
+        # direction of travel, which for a proper approach runs INTO the
+        # wall, i.e. against n -- hence the sign.
+        n = np.asarray(tip, float) - np.asarray(centre, float)
+        d = np.asarray(tip, float) - np.asarray(arrival_from, float)
+        ln, ld = np.linalg.norm(n), np.linalg.norm(d)
+        if ln < 1e-12 or ld < 1e-12:
+            return 1.0
+        return float(-(d @ n) / (ln * ld))
+
+    out["linker-A"] = np.array([
+        cos_at(st["L"][i]["end_A"], st["L"][i]["vertex"],
+               st["T"][prev[i]]["centres"]["A"]) for i in range(nm)])
+    out["linker-C"] = np.array([
+        cos_at(st["L"][i]["end_C"], st["L"][i]["vertex"],
+               st["T"][i]["centres"][ot]) for i in range(nm)])
+    out["pinhead-A"] = np.array([
+        cos_at(st["P"][p]["A_end"], st["P"][p]["spoke_end"],
+               st["T"][t]["centres"]["A"]) for p, (j, t) in enumerate(lay.pairs)
+    ]) if lay.pairs else np.zeros(0)
+    return out
+
+
 def strand_clearances(st, g: Geometry, lay: Layout):
     """Clearance of linker / base / spoke strands against microtubules.
 
-    Returns a dict of (min clearance, overlap depth) per strand type.
-    Negative clearance means the strand is inside a tubule wall. The
-    tubules a strand legitimately binds are excluded.
+    Per strand type: the worst surface-to-surface clearance (negative means
+    the strand is inside a tubule wall), how deep the worst overlap runs,
+    which tubule is nearest, and the same clearance ignoring the strand's own
+    width so the assumed thickness can be backed out.
     """
-    P, unit, tub = tubule_positions(st, g, lay)
-    Rt = g.tubule_radius
-    nm = lay.nm
-    prev = (np.arange(nm) - 1) % nm
-    ot_idx = g.MTn - 1          # index of the outer tubule the linker binds
+    gaps, kinds, labels = strand_gap_matrix(st, g, lay)
     res = {}
-
-    ATTACH_SKIP = 3.0          # nm of strand next to a binding site to ignore
-
-    def scan(segments, exclude_per_seg):
-        """Clearance of each strand against every microtubule.
-
-        A strand legitimately touches the tubules it binds, so the first
-        `ATTACH_SKIP` nm at each end is trimmed before measuring rather than
-        excluding those tubules wholesale. Excluding them entirely (the
-        previous behaviour) meant a strand cutting straight through its own
-        attachment tubule would have been reported as perfectly clear."""
-        best, over, worst = np.inf, 0.0, None
-        for (a, b), excl in zip(segments, exclude_per_seg):
-            a, b = np.asarray(a, float), np.asarray(b, float)
-            v = b - a
-            L = float(np.linalg.norm(v))
-            if L > 2 * ATTACH_SKIP + 0.2:      # trim both ends, keep the middle
-                u_ = v / L
-                a, b = a + ATTACH_SKIP * u_, b - ATTACH_SKIP * u_
-            keep = np.ones(len(P), bool)
-            d = _seg_point_dist(a, b, P[keep]) - Rt
-            k = int(np.argmin(d))
-            if float(d[k]) < best:
-                best = float(d[k])
-                idx = np.where(keep)[0][k]
-                worst = f"{TUBULES[tub[idx]]}{unit[idx]}"
-            over = max(over, float(max(0.0, -d.min())))
-        return dict(min_clearance=None if best is np.inf else best, overlap=over, nearest=worst)
-
-    # A-C linker: binds its own triplet's outer tubule and the previous A
-    segs, excl = [], []
-    for i in range(nm):
-        e = [(i, ot_idx), (prev[i], 0)]
-        segs += [(st["L"][i]["end_C"], st["L"][i]["vertex"]),
-                 (st["L"][i]["vertex"], st["L"][i]["end_A"])]
-        excl += [e, e]
-    res["linker"] = scan(segs, excl)
-
-    segs, excl = [], []
-    for p, (j, t) in enumerate(lay.pairs):
-        segs.append((st["B"][p]["pin_end"], st["B"][p]["link_end"]))
-        excl.append([])
-    res["base"] = scan(segs, excl) if segs else dict(min_clearance=None, overlap=0.0, nearest=None)
-
-    segs, excl = [], []
-    for p, (j, t) in enumerate(lay.pairs):
-        segs.append((st["head"][j], st["spoke_tip"][j]))
-        excl.append([])
-    res["spoke"] = scan(segs, excl) if segs else dict(min_clearance=None, overlap=0.0, nearest=None)
+    for kind in ("linker", "base", "spoke"):
+        rows = [i for i, k in enumerate(kinds) if k == kind]
+        sub = gaps[rows] if rows else np.zeros((0, 0))
+        if not sub.size or not np.isfinite(sub).any():
+            res[kind] = dict(min_clearance=None, overlap=0.0, nearest=None,
+                             centreline_clearance=None)
+            continue
+        sub = np.where(np.isfinite(sub), sub, np.inf)
+        r, c = np.unravel_index(int(np.argmin(sub)), sub.shape)
+        w = 0.5 * g.base_thickness if kind == "base" else g.strand_half_width
+        worst = float(sub[r, c])
+        res[kind] = dict(min_clearance=worst,
+                         overlap=float(max(0.0, -worst)),
+                         nearest=labels[c],
+                         centreline_clearance=worst + w)
     return res
 
 
 # --------------------------------------------------------------------------
-def residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg, bands=None):
+def residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg,
+              bands=None, k_strand=None):
     st = assemble(z, g, lay, reg)
     parts = []
 
@@ -530,7 +768,7 @@ def residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg, ba
         if len(gv):
             parts.append(k_bond * BOND_STRENGTH[name] * gv.ravel())
 
-    dev = joint_deviations(st, g, lay)
+    dev = joint_deviations(st, g, lay, reg)
     for jname, v in dev.items():
         if len(v):
             parts.append(k_angle * angle_penalty(v, jname, bands))
@@ -545,28 +783,25 @@ def residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg, ba
 
     parts.append(k_buckle * z[lay.n_pose:] * 100.0)
     parts.append(k_steric * tubule_overlaps(st, g, lay))
+    if k_strand:
+        parts.append(k_strand * strand_overlaps(st, g, lay))
     return np.concatenate(parts)
 
 
 def _initial_guess(g: Geometry, lay: Layout, reg) -> np.ndarray:
     """Seed from the ideal wild-type-like arrangement."""
     z = np.zeros(lay.n_total)
-    Rt = g.tubule_radius
     # place triplets on a ring whose radius follows the spoke reach
     r0 = g.hub_radius + g.spoke_rod + g.pinhead_span * np.cos(np.radians(g.rest_pinhead))
-    for i in range(lay.nm):
-        phi = i * 360.0 / lay.nm
-        z[lay.i_trip][3 * i: 3 * i + 3] = [r0 * np.cos(np.radians(phi)),
-                                           r0 * np.sin(np.radians(phi)),
-                                           phi + g.rest_triplet]
-    z[lay.i_trip] = z[lay.i_trip]  # (slice assignment above already applied)
+    phi = np.arange(lay.nm) * 360.0 / lay.nm
+    z[lay.i_trip] = np.column_stack([r0 * np.cos(np.radians(phi)),
+                                     r0 * np.sin(np.radians(phi)),
+                                     phi + g.rest_triplet]).ravel()
 
     tri = z[lay.i_trip].reshape(-1, 3)
     loc = _triplet_local(g, reg)
     for i in range(lay.nm):
-        T = _place(loc, tri[i])
-        nxt = (i + 1) % lay.nm
-        v = T["C_pf89"]
+        v = _place(loc, tri[i])["C_pf89"]
         z[lay.i_link][3 * i: 3 * i + 3] = [v[0], v[1], tri[i][2]]
     lk = z[lay.i_link].reshape(-1, 3)
     for i in range(lay.nm):
@@ -586,6 +821,31 @@ def _initial_guess(g: Geometry, lay: Layout, reg) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------
+def _strand_report(strand: dict) -> list:
+    L = ["  strand clearance vs microtubules (negative = clashing; the strand's"
+         " own width counts):"]
+    for k, v in strand.items():
+        c = v["min_clearance"]
+        L.append(f"      {k:<8}: min {c:+7.3f} nm  (nearest {v.get('nearest')}, "
+                 f"centreline {v.get('centreline_clearance'):+.3f})"
+                 if c is not None else f"      {k:<8}: n/a")
+    return L
+
+
+def _approach_report(approach: dict) -> list:
+    """Contacts reached from inside their tubule are impossible, not merely dear."""
+    if not approach:
+        return []
+    L = ["  contact approach (cos: +1 head-on from outside, <0 impossible):"]
+    for k, v in approach.items():
+        if not len(v):
+            continue
+        m = float(np.min(v))
+        note = ("  UNREACHABLE" if m < 0 else "  grazing" if m < APPROACH_GRAZING else "")
+        L.append(f"      {k:<10}: worst {m:+6.3f}{note}")
+    return L
+
+
 @dataclass
 class Solution:
     geom: Geometry
@@ -607,6 +867,7 @@ class Solution:
     max_overlap: float
     strand: dict
     unattached_triplets: list
+    approach: dict = field(default_factory=dict)
 
     def report(self) -> str:
         g = self.geom
@@ -616,8 +877,9 @@ class Solution:
              f"  centriole diam : {self.outer_diameter:6.2f} nm  "
              f"(A-tubule ring {self.a_ring_diameter:.2f} nm, lumen {self.lumen_diameter:.2f} nm)",
              f"  triplet tilt   : {self.triplet_tilt:6.2f} deg from radial"]
-        if self.reg != (0.0, 0.0):
-            L.append(f"  register shift : pinhead {self.reg[0]:+.0f} pf, linker-C {self.reg[1]:+.0f} pf")
+        if any(self.reg):
+            L.append(f"  register shift : pinhead {self.reg[0]:+.0f} pf, "
+                     f"linker-A {self.reg[1]:+.0f} pf, linker-C {self.reg[2]:+.0f} pf")
         if self.unattached_triplets:
             L.append(f"  unattached triplets (no pinhead): {self.unattached_triplets}")
         L.append("  joint rotation (deg from wild-type rest)   [band]:")
@@ -632,11 +894,8 @@ class Solution:
             L.append(f"      {k:<16}: force {v['force']:7.3f}  gap {v['gap']:6.3f} nm")
         L.append(f"    -> closest to rupture: {self.worst_bond}")
         L.append(f"  MT-MT clashes  : {self.n_clashes} pairs, worst overlap {self.max_overlap:.3f} nm")
-        L.append("  strand clearance vs microtubules (negative = clashing):")
-        for k, v in self.strand.items():
-            c = v["min_clearance"]
-            L.append(f"      {k:<8}: min {c:+7.3f} nm  (nearest {v.get('nearest')})"
-                     if c is not None else f"      {k:<8}: n/a")
+        L += _strand_report(self.strand)
+        L += _approach_report(self.approach)
         return "\n".join(L)
 
 
@@ -653,15 +912,23 @@ def solve(
     bands: Optional[dict] = None,
     base_buckle: Optional[float] = None,
     max_nfev: int = 8000,
+    reg=(0.0, 0.0, 0.0),
+    k_strand: float = 30.0,
+    spoke_pivot: bool = True,
 ) -> Solution:
     """Relax the network. Optionally search protofilament register shifts.
 
     With `register_shift=True` the pinhead and linker-C contacts are
     allowed to slide to neighbouring protofilaments; every combination in
-    `shift_range` is solved and the lowest-cost one returned.
+    `shift_range` is solved and the lowest-cost one returned. To pin a
+    register instead, pass it as `reg` -- see :func:`_reg3`.
 
     `bands` overrides :data:`JOINT_BANDS` -- used by
     :func:`band_sensitivity` to test whether a result depends on them.
+
+    `spoke_pivot=False` holds each spoke along the radius through its own
+    SAS-6 head, so it can shorten by buckling but cannot hinge where it meets
+    the hub -- the assumption most treatments of the cartwheel make.
 
     `base_buckle` *drives* the triplet base rather than letting the solver
     choose it: 0.0 holds the base fully extended (its contour length, the
@@ -671,19 +938,24 @@ def solve(
     turns blooming into a controlled experiment -- see
     :func:`blooming_scan`.
     """
-    combos = [(a, b) for a in shift_range for b in shift_range] if register_shift else [(0.0, 0.0)]
+    pin, dA, dC = _reg3(reg)
+    combos = ([(float(a), dA, float(b)) for a in shift_range for b in shift_range]
+              if register_shift else [(pin, dA, dC)])
     best = None
-    for reg in combos:
-        s = _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric,
-                       k_uniform, max_buckle, bands, base_buckle, max_nfev)
+    for r in combos:
+        s = _solve_one(geom, r, k_bond, k_angle, k_buckle, k_steric,
+                       k_uniform, max_buckle, bands, base_buckle, max_nfev,
+                       k_strand, spoke_pivot)
         if best is None or s[1] < best[1]:
             best = (s[0], s[1])
     return best[0]
 
 
 def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
-               max_buckle, jbands=None, base_buckle=None, max_nfev=8000):
+               max_buckle, jbands=None, base_buckle=None, max_nfev=8000,
+               k_strand=30.0, spoke_pivot=True):
     g = geom
+    reg = _reg3(reg)
     lay = Layout(g)
     z0 = _initial_guess(g, lay, reg)
     lo = np.full(lay.n_total, -np.inf)
@@ -695,10 +967,23 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
         lo[lay.b_base] = base_buckle
         hi[lay.b_base] = base_buckle + 1e-9
         z0[lay.b_base] = base_buckle
+    if not spoke_pivot:
+        # hold every spoke on its own radius: no hinge at the SAS-6 head
+        lo[lay.i_spoke] = g.rest_spoke
+        hi[lay.i_spoke] = g.rest_spoke + 1e-9
+        z0[lay.i_spoke] = g.rest_spoke
 
-    out = least_squares(residuals, z0, bounds=(lo, hi), method="trf",
-                        x_scale="jac", ftol=1e-8, xtol=1e-8, gtol=1e-8, max_nfev=max_nfev,
-                        args=(g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform, reg, jbands))
+    def run(start, ks):
+        return least_squares(residuals, start, bounds=(lo, hi), method="trf",
+                             x_scale="jac", ftol=1e-8, xtol=1e-8, gtol=1e-8,
+                             max_nfev=max_nfev,
+                             args=(g, lay, k_bond, k_angle, k_buckle, k_steric,
+                                   k_uniform, reg, jbands, ks))
+
+    # Continuation past the strand-vs-tubule barrier -- see _solve_chain_once.
+    if k_strand:
+        z0 = run(z0, 0.0).x
+    out = run(z0, k_strand)
     z = out.x
     st = assemble(z, g, lay, reg)
 
@@ -711,7 +996,7 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
         bond[k] = dict(gap=float(d.max()), force=float(d.max() * BOND_STRENGTH[k]))
     worst = max(bond, key=lambda k: bond[k]["force"]) if bond else "-"
 
-    dev = joint_deviations(st, g, lay)
+    dev = joint_deviations(st, g, lay, reg)
     strain, bands = {}, {}
     for k, v in dev.items():
         strain[k] = dict(rms=float(np.sqrt(np.mean(v**2))) if len(v) else 0.0,
@@ -741,12 +1026,47 @@ def _solve_one(geom, reg, k_bond, k_angle, k_buckle, k_steric, k_uniform,
         n_clashes=int((ov > 1e-6).sum()), max_overlap=float(ov.max()) if ov.size else 0.0,
         strand=strand_clearances(st, g, lay),
         unattached_triplets=sorted(set(range(lay.nm)) - attached),
+        approach=contact_approach(st, g, lay),
     )
     return sol, float(0.5 * np.sum(out.fun**2))
 
 
 # --------------------------------------------------------------------------
+COLOR_CLASH = "#c0392b"
+
+
+def _capsule(ax, pts, half_width, color, zorder, alpha=1.0):
+    """Draw a poly-line as a solid of the given half-width, in *data* units.
+
+    Line width in points is a property of the figure, not of the structure, so
+    a strand drawn with `lw=5` looks thicker or thinner depending on the zoom
+    and the axis range -- and at typical settings it overlapped protofilaments
+    that the model says it clears. Drawing the strand at its modelled width
+    instead means what you see is what was checked: if a strand looks like it
+    is inside a microtubule, `strand_clearances()` will say so too.
+    """
+    from matplotlib.patches import Circle, Polygon
+
+    pts = [np.asarray(p, float) for p in pts]
+    kw = dict(facecolor=color, edgecolor="none", zorder=zorder, alpha=alpha)
+    for a, b in zip(pts[:-1], pts[1:]):
+        v = b - a
+        L = float(np.linalg.norm(v))
+        if L < 1e-9:
+            continue
+        n = np.array([-v[1], v[0]]) / L * half_width
+        ax.add_patch(Polygon([a + n, b + n, b - n, a - n], closed=True, **kw))
+    for p in pts:                       # round the joints and the ends
+        ax.add_patch(Circle(p, half_width, **kw))
+
+
 def draw(sol: Solution, ax=None, show_pf_labels=False, title=None):
+    """Draw the cross-section. Strands are drawn at their modelled thickness.
+
+    A strand that the model finds buried in a microtubule is drawn in the
+    clash colour and lifted above the protofilaments, so it cannot hide behind
+    them; a clear strand stays below, which is how the A-C linker reads best.
+    """
     import matplotlib.pyplot as plt
     from matplotlib.patches import Circle, Polygon
 
@@ -754,28 +1074,40 @@ def draw(sol: Solution, ax=None, show_pf_labels=False, title=None):
     if ax is None:
         _, ax = plt.subplots(figsize=(7.5, 7.5))
 
+    sg, skinds, _ = strand_gap_matrix(st, g, lay)
+    seg_clash = (np.nanmin(np.where(np.isfinite(sg), sg, np.inf), axis=1) < -CLEAR_TOL
+                 if sg.size else np.zeros(0, bool))
+    clash_of = {}                      # strand kind -> per-segment clash flags
+    for kind in ("linker", "base", "spoke"):
+        clash_of[kind] = [bool(seg_clash[i]) for i, k in enumerate(skinds) if k == kind]
+
+    def style(kind, idx, base_colour):
+        bad = clash_of[kind][idx] if idx < len(clash_of[kind]) else False
+        return (COLOR_CLASH, 6) if bad else (base_colour, 2)
+
     ax.add_patch(Polygon(st["head"], closed=True, facecolor="none",
                          edgecolor=COLOR_HUB, lw=3, zorder=1))
     for j in range(g.N_cw):
-        ax.plot(*np.c_[st["head"][j], st["spoke_tip"][j]], color=COLOR_SPOKE, lw=5,
-                solid_capstyle="round", zorder=2)
+        col, z = style("spoke", j, COLOR_SPOKE)
+        _capsule(ax, [st["head"][j], st["spoke_tip"][j]], g.strand_half_width, col, z)
         ax.add_patch(Circle(st["head"][j], g.head_length / 2, facecolor=COLOR_SPOKE,
                             edgecolor="#231f20", lw=0.6, zorder=3))
     for p in range(lay.npair):
         P, B = st["P"][p], st["B"][p]
         ax.add_patch(Polygon([P["spoke_end"], P["base_pt"], P["A_end"]], closed=True,
                              facecolor=COLOR_PINHEAD, edgecolor="#231f20", lw=0.6, zorder=3))
-        ax.plot(*np.c_[B["pin_end"], B["link_end"]], color=COLOR_BASE, lw=3,
-                solid_capstyle="round", zorder=2)
+        col, z = style("base", p, COLOR_BASE)
+        _capsule(ax, [B["pin_end"], B["link_end"]], 0.5 * g.base_thickness, col, z)
     for i in range(lay.nm):
         L = st["L"][i]
         # Drawn BELOW the protofilaments (zorder 4) by preference, so its last
-        # few nm tuck behind them at the binding site. That can read as the arm
-        # passing through the tubule -- it is not: the arms leave their
-        # attachment pointing outward and no part lies inside any tubule.
-        # Penetration is caught numerically by strand_clearances(), not by eye.
-        ax.plot(*np.c_[L["end_C"], L["vertex"], L["end_A"]], color=COLOR_LINKER, lw=5,
-                solid_capstyle="round", solid_joinstyle="round", zorder=2)
+        # couple of nm tuck behind them at the binding site. That is the normal
+        # case and reads well. A clashing arm would also hide behind them, so a
+        # clash is drawn in the clash colour and lifted above instead.
+        cC, zC = style("linker", 2 * i, COLOR_LINKER)
+        cA, zA = style("linker", 2 * i + 1, COLOR_LINKER)
+        _capsule(ax, [L["end_C"], L["vertex"]], g.strand_half_width, cC, zC)
+        _capsule(ax, [L["vertex"], L["end_A"]], g.strand_half_width, cA, zA)
 
     ov = tubule_overlaps(st, g, lay)
     P, unit, _ = tubule_positions(st, g, lay)
@@ -855,15 +1187,25 @@ def summarise(sol: Solution) -> dict:
         rec[f"buckle_{k}_pct"] = round(v, 3)
     for k, v in sol.bond_force.items():
         rec[f"bond_{k}"] = round(v["force"], 4)
-    rec["reg_pinhead_pf"] = sol.reg[0]
-    rec["reg_linkerC_pf"] = sol.reg[1]
+    # sol.reg is always the 3-tuple (pinhead, linker-A, linker-C). It used to
+    # be indexed as if it were the network solver's 2-tuple, which silently
+    # reported the linker's A-contact shift under the linker-C column.
+    pin_s, dA, dC = _reg3(sol.reg)
+    rec["reg_pinhead_pf"], rec["reg_linkerA_pf"], rec["reg_linkerC_pf"] = pin_s, dA, dC
     rec["worst_bond"] = sol.worst_bond
     rec["worst_bond_force"] = round(sol.bond_force.get(sol.worst_bond, {"force": 0})["force"], 3)
     rec["n_clashes"] = sol.n_clashes
     rec["max_overlap_nm"] = round(sol.max_overlap, 3)
     for k, v in sol.strand.items():
         rec[f"{k}_clear_nm"] = None if v["min_clearance"] is None else round(v["min_clearance"], 3)
+    app = getattr(sol, "approach", {}) or {}
+    for k, v in app.items():
+        rec[f"approach_{k}"] = round(float(np.min(v)), 3) if len(v) else None
+    rec["worst_approach"] = (round(min(float(np.min(v)) for v in app.values() if len(v)), 3)
+                             if any(len(v) for v in app.values()) else None)
+    rec["reachable"] = None if rec["worst_approach"] is None else bool(rec["worst_approach"] > 0)
     rec["n_unattached"] = len(sol.unattached_triplets)
+    rec["spoke_pivot"] = bool(getattr(sol, "spoke_pivot", True))
     rec["converged"] = sol.success
     return rec
 
@@ -975,7 +1317,7 @@ def mode_analysis(geom: Optional[Geometry] = None, n_modes: int = 6,
     npose = lay.n_pose
 
     def resid(zz):
-        return residuals(zz, g, lay, 12.0, 0.25, 3.0, 30.0, 6.0, reg, None)
+        return residuals(zz, g, lay, 12.0, 0.25, 3.0, 30.0, 6.0, reg, None, 30.0)
 
     r0 = resid(z0)
     J = np.zeros((len(r0), npose))
@@ -1216,25 +1558,34 @@ def band_sensitivity(geom: Optional[Geometry] = None,
     return pd.DataFrame(rows)
 
 
-def sweep(param: str, values, geom: Optional[Geometry] = None, **kw):
+def sweep(param: str, values, geom: Optional[Geometry] = None, solver=None, **kw):
+    """Vary one parameter and summarise the solution at each value.
+
+    `solver` defaults to this module's network :func:`solve`; pass
+    ``centriole_chain.solve_chain`` to sweep with the chain formulation the
+    app uses. Kept as an argument rather than an import so this module has no
+    dependency on the one that imports it.
+    """
     import pandas as pd
+    solver = solver or solve
     base = geom if geom is not None else Geometry()
     rows = []
     for v in values:
         rec = {param: v}
-        rec.update(summarise(solve(set_param(base, param, v), **kw)))
+        rec.update(summarise(solver(set_param(base, param, v), **kw)))
         rows.append(rec)
     return pd.DataFrame(rows)
 
 
-def sweep2(pa, va, pb, vb, geom: Optional[Geometry] = None, **kw):
+def sweep2(pa, va, pb, vb, geom: Optional[Geometry] = None, solver=None, **kw):
     import pandas as pd
+    solver = solver or solve
     base = geom if geom is not None else Geometry()
     rows = []
     for a in va:
         for b in vb:
             rec = {pa: a, pb: b}
-            rec.update(summarise(solve(set_param(set_param(base, pa, a), pb, b), **kw)))
+            rec.update(summarise(solver(set_param(set_param(base, pa, a), pb, b), **kw)))
             rows.append(rec)
     return pd.DataFrame(rows)
 

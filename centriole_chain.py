@@ -38,22 +38,18 @@ parent in the tree and keep a free pose.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
 from scipy.optimize import least_squares
 
 from centriole_kinematic import (
-    BOND_STRENGTH, JOINT_BANDS, TUBULES, CONTACT_REST, Geometry, _R, _u, _wrap,
-    angle_penalty, grade, tubule_overlaps, tubule_positions, strand_clearances,
-    _linker_span,
+    BOND_STRENGTH, CLEAR_TOL, Geometry, _approach_report,
+    _reg3, _strand_report, _u, _wrap, angle_penalty, contact_approach,
+    contact_rest, grade, strand_clearances, strand_overlaps, tubule_overlaps,
+    tubule_positions,
 )
-
-
-def _reg3(reg):
-    """Accept a 2-tuple (pinhead, linker-C) or a 3-tuple, return the 3-tuple."""
-    r = tuple(float(v) for v in reg)
-    return r if len(r) == 3 else (r[0], 0.0, r[1])
 
 
 @dataclass
@@ -177,7 +173,22 @@ def loop_gaps(st, g: Geometry, lay: ChainLayout):
     return out
 
 
-def chain_deviations(st, g: Geometry, lay: ChainLayout):
+def chain_deviations(st, g: Geometry, lay: ChainLayout, reg=(0.0, 0.0, 0.0)):
+    """Deviation of each joint from its rest angle (degrees).
+
+    The three microtubule contacts are measured against the rest angle of the
+    protofilament they are actually on, not against wild type -- see
+    :func:`centriole_kinematic.contact_rest`. Without that, sliding a contact
+    by one protofilament looked like 27.7 deg of strain that was never there.
+
+    Note that in this formulation the linker is rigid with a single degree of
+    freedom, so `linker-A` and `linker-C` are two readings of one angle and are
+    numerically identical whenever the ring is symmetric and both contacts
+    carry the same shift. That is not a bug -- the linker really is one body --
+    but it does mean its orientation is charged twice, so the effective weight
+    on the linker is double that on any other joint.
+    """
+    pin_s, dA, dC = _reg3(reg)
     dev = {"spoke": _wrap(st["spoke_dir"] - np.arange(g.N_cw) * 360.0 / g.N_cw
                           - g.rest_spoke)}
     pin, trip, base = [], [], []
@@ -190,24 +201,26 @@ def chain_deviations(st, g: Geometry, lay: ChainLayout):
     dev["triplet"] = np.array(trip) if trip else np.zeros(0)
     dev["base"] = np.array(base) if base else np.zeros(0)
     nm, prev = lay.nm, (np.arange(lay.nm) - 1) % lay.nm
-    dev["linker-A"] = np.array([_wrap(st["L"][i]["theta"] - st["axis"][prev[i]]
-                                      - CONTACT_REST["linker-A"]) for i in range(nm)])
-    dev["linker-C"] = np.array([_wrap(st["L"][i]["theta"] - st["axis"][i]
-                                      - CONTACT_REST["linker-C"]) for i in range(nm)])
+    rA, rC = contact_rest("linker-A", g, dA), contact_rest("linker-C", g, dC)
+    rP = contact_rest("pinhead-A", g, pin_s)
+    dev["linker-A"] = np.array([_wrap(st["L"][i]["theta"] - st["axis"][prev[i]] - rA)
+                                for i in range(nm)])
+    dev["linker-C"] = np.array([_wrap(st["L"][i]["theta"] - st["axis"][i] - rC)
+                                for i in range(nm)])
     dev["pinhead-A"] = np.array(
-        [_wrap(st["P"][p]["theta"] - st["axis"][t] - CONTACT_REST["pinhead-A"])
+        [_wrap(st["P"][p]["theta"] - st["axis"][t] - rP)
          for p, (j, t) in enumerate(lay.pairs)]) if lay.pairs else np.zeros(0)
     return dev
 
 
 def chain_residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform,
-                    reg, bands=None):
+                    reg, bands=None, k_strand=30.0):
     st = assemble_chain(z, g, lay, reg)
     parts = []
     for name, gv in loop_gaps(st, g, lay).items():
         if len(gv):
             parts.append(k_bond * BOND_STRENGTH[name] * gv.ravel())
-    for jname, v in chain_deviations(st, g, lay).items():
+    for jname, v in chain_deviations(st, g, lay, reg).items():
         if len(v):
             parts.append(k_angle * angle_penalty(v, jname, bands))
     pos = st["trip"][:, :2]
@@ -215,6 +228,11 @@ def chain_residuals(z, g, lay, k_bond, k_angle, k_buckle, k_steric, k_uniform,
     parts.append(k_uniform * _wrap(phi - (phi[0] + np.arange(lay.nm) * 360.0 / lay.nm)))
     parts.append(k_buckle * z[lay.n_pose:] * 100.0)
     parts.append(k_steric * tubule_overlaps(st, g, lay))
+    # Strands are solid too. Until this term existed, penetration of a
+    # microtubule by the A-C linker was measured and reported but never
+    # penalised, so nothing stopped a solve from laying an arm along -- or
+    # through -- a tubule wall to reach a shifted protofilament.
+    parts.append(k_strand * strand_overlaps(st, g, lay))
     return np.concatenate(parts)
 
 
@@ -239,10 +257,46 @@ class ChainSolution:
     strand: dict
     unattached_triplets: list
     reg: tuple = (0.0, 0.0, 0.0)
+    approach: dict = field(default_factory=dict)
+    spoke_pivot: bool = True
     register_scan: list = field(default_factory=list)
     cost: float = 0.0
     ruptured: list = field(default_factory=list)
     exact_bonds: tuple = ("pinhead-spoke", "pinhead-triplet", "base-pinhead", "linker-C")
+
+    @property
+    def reachable(self) -> bool:
+        """Does every microtubule contact get reached from outside its tubule?"""
+        vals = [float(np.min(v)) for v in self.approach.values() if len(v)]
+        return bool(vals) and min(vals) > 0.0
+
+    @property
+    def worst_strand_clearance(self) -> float:
+        c = [v["min_clearance"] for v in self.strand.values()
+             if v["min_clearance"] is not None]
+        return float(min(c)) if c else 0.0
+
+    @property
+    def feasible(self) -> bool:
+        """Reachable *and* no strand buried in a microtubule wall.
+
+        Reachability alone is too weak. A contact approached at 17 deg above
+        tangential scores a positive cosine while the arm still lies along the
+        wall for several nm -- which is what the drawing shows as a clash. Both
+        conditions have to hold.
+
+        The two halves do not rest on the same footing, and the difference
+        matters when reporting a result. **Reachability is assumption-free**:
+        it asks only whether a strand arrives from outside its tubule or from
+        within, and comes out the same whatever strand thickness is assumed and
+        whatever weight the steric term carries. **Clearance is not**: it
+        counts the strand's own half-width, which is assumed rather than
+        measured (:attr:`Geometry.strand_half_width`), so registers sitting
+        within a few tenths of a nanometre of zero flip either way if that
+        number moves. Treat those as marginal, and prefer to rest a conclusion
+        on reachability.
+        """
+        return self.reachable and self.worst_strand_clearance > -CLEAR_TOL
 
     def report(self) -> str:
         g = self.geom
@@ -251,10 +305,12 @@ class ChainSolution:
              f"  centriole diam : {self.outer_diameter:6.2f} nm  "
              f"(A-tubule ring {self.a_ring_diameter:.2f} nm, lumen {self.lumen_diameter:.2f} nm)",
              f"  triplet tilt   : {self.triplet_tilt:6.2f} deg from radial",
-             "  joint rotation (deg from wild-type rest)   [band]:"]
+             "  joint rotation (deg from the rest angle of the bound protofilament)   [band]:"]
         for k, v in self.joint_strain.items():
+            note = "   (LOCKED: spoke held radial)" if (
+                k == "spoke" and not self.spoke_pivot) else ""
             L.append(f"      {k:<9}: rms {v['rms']:6.2f}  max {v['max']:+7.2f}   "
-                     f"{self.joint_bands[k]}")
+                     f"{self.joint_bands[k]}{note}")
         L.append("  connections held EXACTLY (cannot separate): "
                  + ", ".join(self.exact_bonds))
         L.append("  loop closures (the only ones that can open):")
@@ -263,19 +319,43 @@ class ChainSolution:
         if any(self.reg):
             L.append(f"  register        : pinhead {self.reg[0]:+.0f} pf, "
                      f"linker-A {self.reg[1]:+.0f} pf, linker-C {self.reg[2]:+.0f} pf")
-        if self.register_scan:
-            L.append("  register options, best model cost first "
-                     "(NOTE: lowest cost is not evidence -- compare against data):")
-            for r in self.register_scan[:5]:
-                L.append(f"      A{r['linkA']:+.0f}/C{r['linkC']:+.0f}  "
-                         f"cost {r['cost']:9.2f}  outer {r['outer']:7.2f} nm  "
-                         f"tilt {r['tilt']:+6.2f} deg")
         buck = {k: v for k, v in self.buckling.items() if abs(v) > 0.01}
         L.append("  buckling: " + (", ".join(f"{k} {v:.2f}%" for k, v in buck.items())
                                    if buck else "none"))
         L.append(f"  MT-MT clashes  : {self.n_clashes} pairs, "
                  f"worst overlap {self.max_overlap:.3f} nm")
+        L += _strand_report(self.strand)
+        L += _approach_report(self.approach)
+        if self.register_scan:
+            L += _register_scan_report(self.register_scan)
         return "\n".join(L)
+
+
+def _register_scan_report(scan: list, n: int = 5) -> list:
+    """The register table, reachable candidates first.
+
+    Ordering is by model cost *within* the reachable set, because an
+    unreachable register is not a cheaper answer -- it is not an answer. Cost
+    itself remains a model quantity and not evidence; see :func:`solve_chain`.
+    """
+    ok = [r for r in scan if r["feasible"]]
+    bad = [r for r in scan if not r["feasible"]]
+    L = [f"  register options ({len(ok)} of {len(scan)} feasible), "
+         "cheapest feasible first:",
+         "      A / C     cost      outer    tilt   worst-gap  clearance  approach"]
+
+    def row(r, mark=" "):
+        return (f"    {mark} {r['linkA']:+.0f}/{r['linkC']:+.0f}  {r['cost']:9.1f}  "
+                f"{r['outer']:7.2f}  {r['tilt']:+6.2f}  {r['worst_gap']:7.3f}  "
+                f"{r['strand_clear']:+8.3f}  {r['approach']:+7.3f}")
+    L += [row(r) for r in ok[:n]] or ["      (none -- every register clashes)"]
+    if bad:
+        L.append(f"      -- {len(bad)} rejected: a strand would arrive through a "
+                 "tubule wall, or ends up buried in one. Worst first:")
+        L += [row(r, "x") for r in sorted(bad, key=lambda r: r["strand_clear"])[:3]]
+    L.append("      Lowest cost is NOT evidence. Compare the outer and tilt "
+             "columns against your own measurement.")
+    return L
 
 
 def solve_chain(geom: Optional[Geometry] = None, k_bond: float = 600.0,
@@ -283,45 +363,102 @@ def solve_chain(geom: Optional[Geometry] = None, k_bond: float = 600.0,
                 k_steric: float = 30.0, k_uniform: float = 6.0,
                 max_buckle: float = 0.35, bands: Optional[dict] = None,
                 reg=(0.0, 0.0, 0.0), max_nfev: int = 8000,
-                register_shift: bool = False,
+                register_shift: bool = False, k_strand: float = 30.0,
+                spoke_pivot: bool = True,
                 shift_range=(-2, -1, 0, 1, 2)) -> ChainSolution:
     """Solve, optionally searching protofilament registers.
 
-    With `register_shift=True` both A-C linker contacts are slid over
-    `shift_range` whole protofilaments (25 combinations by default, ~1 s
-    each) and the lowest-cost solution is returned. The pinhead contact
-    stays at whatever `reg[0]` specifies.
+    `spoke_pivot=False` forbids the SAS-6 coiled coil from turning at its
+    head, so each spoke points strictly along its own radius -- see
+    :func:`_solve_chain_once`.
 
-    **The ranking is by model cost, which is not evidence.** Every candidate
-    is kept in `register_scan` precisely because the cheapest is often not
-    the interesting one: for a spoke shortened to 28 nm the model prefers
-    wild-type register, yet the shifted register is what reproduces the
-    measured diameter. Read the whole scan and compare against data rather
-    than trusting the winner.
+    With `register_shift=True` both A-C linker contacts are slid over
+    `shift_range` whole protofilaments (25 combinations by default) and the
+    best solution is returned. The pinhead contact stays at whatever `reg[0]`
+    specifies. Every candidate is kept in `register_scan`, and
+    :func:`best_registers` extracts the leading few with their metrics.
+
+    **Read this before using the ranking.** Candidates are ordered by model
+    cost *within the reachable set*: a register that requires a strand to
+    arrive at its protofilament from inside the tubule is not a cheap answer,
+    it is not an answer, so it is listed separately rather than ranked.
+    Among the reachable ones, cost is still a model quantity built from
+    reasoned-not-measured joint bands and bond strengths, so **the cheapest
+    register is not the most likely one**. Compare the outer-diameter and tilt
+    columns against your own data and treat the ranking as a shortlist.
+
+    Two earlier defects made this search actively misleading, and both are
+    fixed:
+
+    - contact rest angles were not re-referenced when the register shifted,
+      so every shifted candidate was charged a spurious 27.7 deg of strain
+      (:func:`centriole_kinematic.contact_rest`);
+    - nothing penalised a strand lying along or through a microtubule, so the
+      search could and did return registers whose A-C linker reached its site
+      tangentially through the tubule wall.
     """
     if not register_shift:
         return _solve_chain_once(geom, k_bond, k_angle, k_buckle, k_steric,
-                                 k_uniform, max_buckle, bands, reg, max_nfev)[0]
+                                 k_uniform, max_buckle, bands, reg, max_nfev,
+                                 k_strand, spoke_pivot)[0]
 
     pin = _reg3(reg)[0]
-    best, scan = None, []
+    scan = []
     for dA in shift_range:
         for dC in shift_range:
             sol, cost = _solve_chain_once(geom, k_bond, k_angle, k_buckle,
                                           k_steric, k_uniform, max_buckle, bands,
-                                          (pin, float(dA), float(dC)), max_nfev)
-            scan.append(dict(linkA=float(dA), linkC=float(dC), cost=cost,
-                             outer=sol.outer_diameter, tilt=sol.triplet_tilt,
-                             worst_gap=max(v["gap"] for v in sol.bond_force.values())))
-            if best is None or cost < best[1]:
-                best = (sol, cost)
-    scan.sort(key=lambda r: r["cost"])
-    best[0].register_scan = scan
-    return best[0]
+                                          (pin, float(dA), float(dC)), max_nfev,
+                                          k_strand, spoke_pivot)
+            worst_app = min((float(np.min(v)) for v in sol.approach.values() if len(v)),
+                            default=1.0)
+            clear = min((v["min_clearance"] for v in sol.strand.values()
+                         if v["min_clearance"] is not None), default=0.0)
+            rms = float(np.sqrt(np.mean([v["rms"] ** 2
+                                         for v in sol.joint_strain.values()])))
+            scan.append(dict(
+                linkA=float(dA), linkC=float(dC), cost=cost, sol=sol,
+                outer=sol.outer_diameter, a_ring=sol.a_ring_diameter,
+                lumen=sol.lumen_diameter, tilt=sol.triplet_tilt, joint_rms=rms,
+                worst_gap=max(v["gap"] for v in sol.bond_force.values()),
+                strand_clear=float(clear), approach=float(worst_app),
+                reachable=bool(worst_app > 0.0),
+                feasible=bool(worst_app > 0.0 and clear > -CLEAR_TOL),
+                n_clashes=sol.n_clashes, converged=sol.success,
+                worst_band=max(sol.joint_bands.values(),
+                               key=lambda b: ["-", "OK", "HARD", "SEVERE"].index(b))))
+    # feasible first, then by cost -- an infeasible register is not a rival
+    scan.sort(key=lambda r: (not r["feasible"], r["cost"]))
+    best = scan[0]["sol"]
+    best.register_scan = scan
+    return best
+
+
+def best_registers(sol: ChainSolution, n: int = 3, feasible_only: bool = True):
+    """The leading `n` candidates from a register search, with their metrics.
+
+    Returns a list of plain dicts (no solution objects), ready to tabulate.
+    `feasible_only` drops registers that would need a strand to reach its
+    protofilament through a tubule wall, or that leave one buried in a wall;
+    pass False to see them anyway and read the `reachable` and `strand_clear`
+    columns yourself.
+    """
+    scan = sol.register_scan or []
+    rows = [r for r in scan if r["feasible"]] if feasible_only else list(scan)
+    return [{k: v for k, v in r.items() if k != "sol"} for r in rows[:n]]
+
+
+def register_solution(sol: ChainSolution, linkA: float, linkC: float):
+    """Pull one candidate's full ChainSolution back out of a register scan."""
+    for r in sol.register_scan or []:
+        if r["linkA"] == linkA and r["linkC"] == linkC:
+            return r["sol"]
+    return None
 
 
 def _solve_chain_once(geom, k_bond, k_angle, k_buckle, k_steric, k_uniform,
-                      max_buckle, bands, reg, max_nfev):
+                      max_buckle, bands, reg, max_nfev, k_strand=30.0,
+                      spoke_pivot=True):
     """One solve at a fixed register. Returns (solution, least-squares cost).
 
     `k_bond` defaults to 600, which makes loop closure strictly dominate the
@@ -333,8 +470,29 @@ def _solve_chain_once(geom, k_bond, k_angle, k_buckle, k_steric, k_uniform,
     was meant to remove. Raising it drives every gap below 0.03 nm, pushes the
     strain into the joint angles where it can be read and graded, and happens
     to be ~150x faster because the problem becomes well determined.
+
+    The solve runs in two stages when the strand-vs-tubule term is on. That
+    term is a barrier, and the rest-angle initial guess starts *inside* it --
+    at a 28 nm spoke the guess buries a linker arm 7.0 nm into a tubule wall.
+    Handed the full problem from there the solver crawls out over ~1500
+    iterations. Solving first without the barrier costs about 30 iterations
+    and lands somewhere already clear, so the second stage starts feasible and
+    converges immediately. Both stages minimise the same objective apart from
+    that one term, and the reported cost is the second stage's.
+
+    `spoke_pivot=False` holds every spoke at `rest_spoke`, i.e. exactly along
+    the radius through its own SAS-6 head. The coiled coil may then still
+    shorten by buckling, but it cannot turn at the head -- the assumption most
+    treatments of the cartwheel make, in which the spoke strains radially and
+    nothing hinges where it meets the hub. It removes `N_cw` degrees of
+    freedom, so for a 9-fold centriole the chain form drops from 45 unknowns
+    to 36 against 36 loop constraints: exactly determined, with no slack left
+    to absorb a mismatch. Expect strain to appear elsewhere, and expect the
+    loop closures to open where they previously did not -- which is the point
+    of being able to compare the two.
     """
     g = geom if geom is not None else Geometry()
+    reg = _reg3(reg)
     lay = ChainLayout(g)
 
     z0 = np.zeros(lay.n_total)
@@ -343,7 +501,7 @@ def _solve_chain_once(geom, k_bond, k_angle, k_buckle, k_steric, k_uniform,
     z0[lay.i_trip] = g.rest_triplet
     z0[lay.i_base] = g.rest_base
     step = 360.0 / lay.nm
-    z0[lay.i_link] = [g.rest_triplet + CONTACT_REST["linker-C"] + i * step
+    z0[lay.i_link] = [g.rest_triplet + contact_rest("linker-C", g, reg[2]) + i * step
                       for i in range(lay.nm)]
     if len(lay.free_trips):
         r0 = g.hub_radius + g.spoke_rod + g.pinhead_span
@@ -358,12 +516,47 @@ def _solve_chain_once(geom, k_bond, k_angle, k_buckle, k_steric, k_uniform,
     hi = np.full(lay.n_total, np.inf)
     lo[lay.n_pose:] = 0.0
     hi[lay.n_pose:] = max_buckle
+    if not spoke_pivot:
+        # pin rather than remove: least_squares needs lo strictly below hi
+        lo[lay.i_spoke] = g.rest_spoke
+        hi[lay.i_spoke] = g.rest_spoke + 1e-9
+        z0[lay.i_spoke] = g.rest_spoke
 
-    out = least_squares(chain_residuals, z0, bounds=(lo, hi), method="trf",
-                        x_scale="jac", ftol=1e-9, xtol=1e-9, gtol=1e-9,
-                        max_nfev=max_nfev,
-                        args=(g, lay, k_bond, k_angle, k_buckle, k_steric,
-                              k_uniform, reg, bands))
+    def run(start, ks, nfev):
+        """Solve, falling back to an iterative trust-region step if needed.
+
+        `trf` factorises the augmented Jacobian with a dense SVD, and on badly
+        conditioned geometries LAPACK occasionally fails to converge and raises
+        -- a singlet centriole (MTn=1) at a shifted register does it. That is a
+        linear-algebra failure, not a modelling one, so retry with `lsmr`,
+        which takes the same step iteratively and never factorises. If even
+        that fails, return the starting point flagged unconverged rather than
+        taking down a whole 25-register scan for one bad cell.
+        """
+        kw = dict(bounds=(lo, hi), method="trf", ftol=1e-9, xtol=1e-9,
+                  gtol=1e-9, max_nfev=nfev,
+                  args=(g, lay, k_bond, k_angle, k_buckle, k_steric,
+                        k_uniform, reg, bands, ks))
+        for solver in ("exact", "lsmr"):
+            try:
+                return least_squares(chain_residuals, start, x_scale="jac",
+                                     tr_solver=solver, **kw)
+            except (np.linalg.LinAlgError, ValueError):
+                continue
+        return SimpleNamespace(
+            x=np.asarray(start, float), success=False,
+            cost=float(0.5 * np.sum(chain_residuals(
+                start, g, lay, k_bond, k_angle, k_buckle, k_steric,
+                k_uniform, reg, bands, ks) ** 2)))
+
+    out = run(z0, 0.0 if k_strand else k_strand, max_nfev)
+    if k_strand and strand_overlaps(assemble_chain(out.x, g, lay, reg),
+                                    g, lay).max(initial=0.0) > 0.0:
+        # Only pay for the second stage when something is actually inside a
+        # wall. Where nothing is, the barrier contributes no residual and no
+        # gradient, so re-solving would return the same point after one
+        # iteration -- and that is the common case.
+        out = run(out.x, k_strand, max_nfev)
     z = out.x
     st = assemble_chain(z, g, lay, reg)
 
@@ -376,7 +569,7 @@ def _solve_chain_once(geom, k_bond, k_angle, k_buckle, k_steric, k_uniform,
         bond.setdefault(k, dict(gap=0.0, force=0.0))
     worst = max(bond, key=lambda k: bond[k]["force"]) if bond else "-"
 
-    dev = chain_deviations(st, g, lay)
+    dev = chain_deviations(st, g, lay, reg)
     strain, bnds = {}, {}
     for k, v in dev.items():
         strain[k] = dict(rms=float(np.sqrt(np.mean(v**2))) if len(v) else 0.0,
@@ -407,6 +600,7 @@ def _solve_chain_once(geom, k_bond, k_angle, k_buckle, k_steric, k_uniform,
         bond_force=bond, worst_bond=worst,
         n_clashes=int((ov > 1e-6).sum()), max_overlap=float(ov.max()) if ov.size else 0.0,
         strand=strand_clearances(st, g, lay),
-        unattached_triplets=sorted(lay.free_trips), reg=_reg3(reg),
+        unattached_triplets=sorted(lay.free_trips), reg=reg,
+        approach=contact_approach(st, g, lay), spoke_pivot=bool(spoke_pivot),
         cost=float(out.cost)),
         float(out.cost))
