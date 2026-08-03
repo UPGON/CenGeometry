@@ -1,0 +1,15 @@
+{
+ "objective": 6.928,
+ "residual": 16.656,
+ "hub": 12.06,
+ "chain": 2.766,
+ "gaps": 11.42,
+ "dof": 4.662,
+ "band": 7.167,
+ "buckle": 9.347,
+ "steric": 2.601,
+ "pfangle": 10.891,
+ "reref": 11.479,
+ "approach": 8.826,
+ "gaussnewton": 8.699
+}
