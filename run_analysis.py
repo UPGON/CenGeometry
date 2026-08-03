@@ -52,8 +52,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 from centriole_kinematic import (  # noqa: E402
-    Geometry, draw, set_param, solve, summarise, sweep,
+    Geometry, draw, set_param, summarise, sweep,
 )
+# Use the chain formulation, as the app does. The older spring-network solve()
+# lets its bonds open by 1-3 nm under a large perturbation -- at a 28 nm SAS-6
+# spoke the pinhead visibly separates from the spoke -- which corrupts exactly
+# the mutant this CLI exists to model. See docs/blade_rotation_discrepancy.md.
+from centriole_chain import solve_chain as solve  # noqa: E402
 
 
 def _banner(msg):
@@ -64,13 +69,13 @@ def _rms(sol):
     return float(np.sqrt(np.mean([v["rms"] ** 2 for v in sol.joint_strain.values()])))
 
 
-def single(cartwheel, triplets, mtn, **over):
+def single(cartwheel, triplets, mtn, spoke_pivot=True, **over):
     """Solve and render one configuration."""
     g = Geometry(N_cw=cartwheel, N_mt=triplets, MTn=mtn)
     for k, v in over.items():
         if v is not None:
             g = set_param(g, k, v)
-    sol = solve(g)
+    sol = solve(g, spoke_pivot=spoke_pivot)
 
     fig, ax = plt.subplots(figsize=(8, 8))
     draw(sol, ax=ax, show_pf_labels=True)
@@ -125,7 +130,7 @@ def standard_report():
     _plot_sweep(df, "symmetry", "symmetry (N-fold)", "symmetry_sweep.png")
 
     _banner("4/4  SAS-6 coiled-coil length sweep")
-    df = sweep("spoke_rod", [35, 40, 45.03, 50, 55, 60])
+    df = sweep("spoke_rod", [35, 40, 45.03, 50, 55, 60], solver=solve)
     df.to_csv(RESULTS / "spoke_length_sweep.csv", index=False)
     _plot_sweep(df, "spoke_rod", "SAS-6 coiled-coil length (nm)", "spoke_length_sweep.png")
     for _, r in df.iterrows():
@@ -167,14 +172,19 @@ def _summary_file(wt):
         "  spoke_length_sweep.*    effect of SAS-6 coiled-coil length",
         "",
         "How to read the output:",
-        "  joint rotation   how far each connection had to turn from its",
-        "                   wild-type angle. OK (<15 deg) / HARD (15-35) /",
-        "                   FORBIDDEN (>35).",
+        "  joint rotation   how far each connection had to turn from the rest",
+        "                   angle of the protofilament it binds, graded OK /",
+        "                   HARD / SEVERE against that joint's own limits.",
+        "                   These are assumed tolerances, NOT verdicts on",
+        "                   whether a structure can form.",
         "  bond load        which connection carries the most strain, i.e.",
         "                   which would break first.",
         "  clashes          microtubules overlapping in space (impossible).",
-        "  clearance        how close a strand passes to a microtubule;",
-        "                   negative means it is passing through one.",
+        "  clearance        how close a strand passes to a microtubule,",
+        "                   counting its own thickness; negative means it is",
+        "                   inside a tubule wall.",
+        "  approach         how squarely a strand meets the protofilament it",
+        "                   binds (+1 head-on from outside, below 0 impossible).",
     ]
     (RESULTS / "summary.txt").write_text("\n".join(lines))
     print("\n  -> summary: results/summary.txt")
@@ -198,6 +208,9 @@ def main():
     ap.add_argument("--pinhead-length", type=float, help="pinhead length in nm")
     ap.add_argument("--linker-length", type=float, help="A-C linker length in nm")
     ap.add_argument("--protofilaments", type=int, help="protofilaments in the A-tubule")
+    ap.add_argument("--lock-spoke", action="store_true",
+                    help="hold each SAS-6 spoke on its own radius, so it can only "
+                         "strain outwards and cannot bend at the head")
     ap.add_argument("--sweep", metavar="PARAM", choices=sorted(FRIENDLY),
                     help="vary one parameter: " + ", ".join(sorted(FRIENDLY)))
     ap.add_argument("--from", dest="lo", type=float, help="sweep start value")
@@ -217,7 +230,8 @@ def main():
         if args.sweep in ("N_cw", "N_mt", "MTn", "n_pf_A"):
             vals = sorted({int(round(v)) for v in vals})
         _banner(f"Sweeping {FRIENDLY[args.sweep]}")
-        df = sweep(args.sweep, vals)
+        df = sweep(args.sweep, vals, solver=solve,
+                   spoke_pivot=not args.lock_spoke)
         out = RESULTS / f"sweep_{args.sweep}.csv"
         df.to_csv(out, index=False)
         cols = ["diameter_nm", "joint_rms_deg", "max_buckle_pct", "n_clashes", "worst_bond"]
@@ -226,13 +240,14 @@ def main():
         print(f"  -> table : results/{out.name}")
         return
 
-    custom = any(v is not None for v in
+    custom = args.lock_spoke or any(v is not None for v in
                  (args.cartwheel, args.triplets, args.tubules, args.spoke_length,
                   args.base_length, args.pinhead_length, args.linker_length,
                   args.protofilaments))
     if custom:
         _banner("Single configuration")
         single(args.cartwheel or 9, args.triplets or 9, args.tubules or 3,
+               spoke_pivot=not args.lock_spoke,
                spoke_rod=args.spoke_length, base_length=args.base_length,
                pinhead_span=args.pinhead_length, linker_length=args.linker_length,
                n_pf_A=args.protofilaments)

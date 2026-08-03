@@ -56,7 +56,8 @@ fits together and reports:
 | **Bond load** | Which connection carries the most strain, i.e. which would rupture first |
 | **Buckling** | Which segments had to bow because space became too tight (segments never stretch) |
 | **Clashes** | Microtubules overlapping in space — physically impossible |
-| **Clearance** | How close the linker, base and spoke pass to microtubules; negative means passing through one |
+| **Clearance** | How close the linker, base and spoke pass to microtubules, counting the strand's own thickness; negative means it is inside a tubule wall, and it is drawn in red |
+| **Approach** | How squarely each strand meets the protofilament it binds: +1 head-on from outside the tubule, 0 tangential, below 0 impossible |
 | **Diameter** | Resulting centriole diameter in nm |
 
 ### Design principles
@@ -108,6 +109,34 @@ fits together and reports:
   band_sensitivity(Geometry(N_cw=8, N_mt=9))   # scales all bands 0.5x - 2x
   ```
 
+- **The spoke may hinge at its head, or not — your choice.** By default the
+  SAS-6 coiled coil can turn where it meets its head on the hub ring, and the
+  `spoke` grade reports how far. `spoke_pivot=False` (app: *Spoke cannot bend
+  at the SAS-6 head*; CLI: `--lock-spoke`) instead holds each spoke on the
+  radius through its own head, so it strains outwards but never hinges — the
+  assumption most treatments of the cartwheel make.
+
+  Wild type is nearly indifferent: 255 nm either way, overall strain 1.4° vs
+  1.6°, because a wild-type spoke barely pivots. A *mismatched* cartwheel is
+  transformed. With 8 spokes on 9 triplets the free spoke swings −20.9° to
+  reach; locked, it cannot, so it buckles 27.5% instead, the diameter opens
+  from 256 to 279 nm, and the loop closures begin to gape.
+
+  | 8 cw / 9 mt | free spoke | locked spoke |
+  |---|---|---|
+  | Outer diameter | 256.4 nm | 279.0 nm |
+  | Spoke rotation | −20.9° | 0° (by construction) |
+  | Spoke buckling | 1.1% | 27.5% |
+  | Joint strain, RMS | 7.1° | 19.2° |
+  | Worst loop gap | 0.002 nm | 0.186 nm |
+
+  Run both. A conclusion that survives the toggle does not depend on the
+  assumption; one that flips is being carried by it. Note that with the spoke
+  locked the `spoke` grade reads 0° **by construction, not by relaxation** —
+  and that locking removes `N_cw` degrees of freedom, leaving a 9-fold chain
+  exactly determined at 36 unknowns against 36 loop constraints, with no
+  slack to absorb a mismatch.
+
 - **Hub size follows symmetry.** SAS-6 heads oligomerise at a fixed
   head-to-head spacing, so hub radius = `d / (2·sin(π/N))`. An 8-fold
   cartwheel is automatically tighter than a 9-fold one.
@@ -131,7 +160,6 @@ Key measured values (nm):
 | SAS-6 dimer (head + coiled coil) | 50.0 (4.98 + 45.0) |
 | Pinhead span | 21.3 |
 | Triplet base | 34.7 |
-| A-C linker arms | 14.6 (to C) and 11.6 (to A), meeting at 138.7° |
 | Tubule radius | 11.9 |
 | A→B / B→C spacing | 18.8 / 19.6 |
 | Triplet axis vs spoke | −56.9° |
@@ -139,6 +167,13 @@ Key measured values (nm):
 Two findings worth noting: the B- and C-tubules carry 9 protofilaments at
 the **same 27.7° lattice pitch as the A-tubule's 13** (not 360/9), and the
 A-C linker is **bent, not straight**.
+
+**Three values do not come from `svg_calibration.py`.** The A-C linker's two
+arm lengths and its vertex angle (14.6 nm to C, 11.6 nm to A, meeting at
+138.7°) were read off the schematic by hand; the calibration measures only
+where the linker *attaches*. A fourth, the strand half-width used for
+clearance and steric checks, is assumed outright at 1 nm — half the diameter
+of a two-stranded coiled coil — and nothing kinematic depends on it.
 
 **One value is fitted, not measured.** `head_contact` (the SAS-6 head-head
 spacing, which sets the hub radius) cannot be read off the schematic,
@@ -158,8 +193,8 @@ measurement limit rather than a solver limit.
 ## Validation
 
 The model was never told that 9-fold symmetry is special. Sweeping each
-parameter independently, the measured wild-type value sits at a strain
-minimum in every case:
+parameter independently with `solve_chain`, the measured wild-type value sits
+at a strain minimum in every case:
 
 | Parameter | Measured | Strain-minimising |
 |---|---|---|
@@ -171,6 +206,10 @@ minimum in every case:
 
 Wild-type diameter comes out at **255 nm**, against roughly 250 nm measured
 in real centrioles.
+
+Re-verified after the 2026 correction to the contact rest angles and the
+addition of the steric checks — every minimum is unmoved, and wild type solves
+with all seven joints graded OK, zero clashes, and every contact reachable.
 
 ---
 
@@ -224,6 +263,7 @@ python run_analysis.py                                  # standard report
 python run_analysis.py --cartwheel 8                    # 8 spokes, 9 triplets
 python run_analysis.py --triplets 8 --tubules 2         # 8 doublets
 python run_analysis.py --sweep spoke_rod --from 35 --to 60
+python run_analysis.py --cartwheel 8 --lock-spoke        # spoke cannot hinge
 python run_analysis.py --help                           # all options
 ```
 
@@ -233,15 +273,18 @@ Everything lands in `results/` as PNG figures, CSV tables and a
 ### From Python
 
 ```python
-from centriole_kinematic import Geometry, solve, draw, sweep, sweep2
+from centriole_kinematic import Geometry, draw, sweep, sweep2
+from centriole_chain import solve_chain, best_registers
 
-sol = solve(Geometry(N_cw=8, N_mt=9))    # 8-fold cartwheel, 9 triplets
+sol = solve_chain(Geometry(N_cw=8, N_mt=9))   # 8-fold cartwheel, 9 triplets
+rigid = solve_chain(Geometry(N_cw=8, N_mt=9), spoke_pivot=False)  # no hinge at the head
 print(sol.report())
 print(sol.outer_diameter, sol.worst_bond, sol.unattached_triplets)
+print(sol.feasible, sol.reachable)            # is every contact reachable?
 
-sweep("spoke_rod", [35, 40, 45, 50, 55])            # one parameter
-sweep("N_both", range(6, 12))                       # symmetry, both rings together
-sweep2("N_both", range(7, 11), "spoke_rod", [40, 45, 50])   # two parameters
+sweep("spoke_rod", [35, 40, 45, 50, 55], solver=solve_chain)
+sweep("N_both", range(6, 12), solver=solve_chain)
+sweep2("N_both", range(7, 11), "spoke_rod", [40, 45, 50], solver=solve_chain)
 ```
 
 ### Parameters
@@ -253,9 +296,19 @@ Less commonly: `pinhead_span`, `linker_length`, `MTn` (3/2/1 for
 triplet/doublet/singlet), `n_pf_A` (protofilament count, which also sets
 tubule radius).
 
-Optional: `solve(..., register_shift=True)` lets the pinhead and linker
-contacts slide to neighbouring protofilaments, testing whether a mutant
-could relieve strain by re-registering instead of deforming.
+Optional: `solve_chain(..., register_shift=True)` slides both A-C linker
+contacts over ±2 protofilaments (25 combinations, ~290 s), testing whether a
+mutant could relieve strain by re-registering instead of deforming.
+`best_registers(sol, 3)` returns the leading candidates with their metrics.
+
+Read the result carefully. Registers needing a strand to reach its
+protofilament *through* a microtubule are excluded outright — not ranked, as
+they are not answers. The rest are ordered by **model cost**, which is built
+from joint tolerances and bond strengths that were reasoned rather than
+measured, so **the cheapest register is not the most likely one**. Treat the
+ranking as a shortlist and compare the diameter and tilt columns against your
+own data. See [`docs/blade_rotation_discrepancy.md`](docs/blade_rotation_discrepancy.md)
+for a worked case where this distinction changed the conclusion.
 
 ---
 
@@ -265,20 +318,33 @@ could relieve strain by re-registering instead of deforming.
 START HERE (Mac).command / (Windows).bat   double-click launchers
 app.py                   interactive Streamlit app (start here)
 run_analysis.py          command-line entry point
-centriole_kinematic.py   the model
+centriole_chain.py       the solver in use: connection points cannot separate
+centriole_kinematic.py   geometry, drawing, metrics, and the older spring solver
 svg_calibration.py       extracts every constant from the schematic
 QUICKSTART.html          one-page guide for non-programmers
 data/                    source schematics (SVG, Illustrator, PNG)
+docs/                    self-contained notes on three investigations
+presentations/           slide decks
 legacy/                  the original MATLAB script and earlier ports
 results/                 generated output (not tracked by git)
 ```
 
+**Two solvers, and only one of them should be used.** `centriole_chain.solve_chain`
+makes four of the six connections exact by construction, so parts cannot drift
+apart under load. `centriole_kinematic.solve` is the older spring network: its
+bonds open by 1–3 nm under a large perturbation, visibly separating the spoke
+from the pinhead. The app and `run_analysis.py` both use `solve_chain`; `solve`
+is kept for the soft-mode and blooming analyses that were built on it.
+
 `docs/` holds self-contained notes on three investigations, each resumable
 without re-deriving anything:
 
-- [**A-C linker register**](docs/blade_rotation_discrepancy.md) — *live.* A
-  measured mutant disagreed with the model until the linker was allowed to
-  re-register; now a specific cryo-ET-testable prediction.
+- [**A-C linker register**](docs/blade_rotation_discrepancy.md) — *live, and
+  recently reopened.* A measured mutant disagreed with the model until the
+  linker was allowed to re-register. Two defects in the register machinery
+  have since been fixed, which moved the answer: the register that reproduced
+  the measurement turns out to be at or past the edge of what is geometrically
+  reachable. Still a cryo-ET-testable prediction, but a different one.
 - [blooming / iris motion](docs/blooming_handoff.md) — parked on the 2D
   limitation.
 - [soft-mode analysis](docs/parked_soft_modes.md) — parked as
@@ -301,4 +367,11 @@ plus two intermediate Python models. They are superseded by
   than hard-limited, so a `FORBIDDEN` result means "very costly", not
   "geometrically impossible".
 - **Steric checks cover** tubule–tubule overlap and strand–tubule
-  clearance, not every possible contact.
+  clearance, not every possible contact. The pinhead is not steric-checked.
+- **Strand thickness is assumed,** at 1 nm half-width, so clearances within a
+  few tenths of a nanometre of zero are marginal. The companion reachability
+  check — does a strand arrive from outside its tubule or from within? — needs
+  no such assumption and is the firmer of the two.
+- **In the chain formulation the A-C linker has one degree of freedom,** so
+  its two contacts report the same angle and its orientation is effectively
+  charged twice relative to other joints.
