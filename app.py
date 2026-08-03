@@ -26,7 +26,10 @@ from centriole_kinematic import (
 # never visibly separate under load. The older spring-based solve() opened the
 # spoke-to-pinhead connection by ~2.8 nm at a 28 nm spoke, which is wrong at
 # any load, so the app uses the chain form throughout.
-from centriole_chain import solve_chain as solve
+from centriole_chain import best_registers, register_solution, solve_chain as solve
+
+#: how many register candidates to show side by side
+TOP_N = 3
 
 st.set_page_config(page_title="CenGeometry", page_icon="🔬", layout="wide")
 
@@ -77,46 +80,61 @@ WT_PARAMS = (9, 9, 3, float(DEFAULTS.spoke_rod), float(DEFAULTS.base_length),
 
 
 @st.cache_data(show_spinner=False)
-def wt_metrics() -> dict:
-    """Wild-type values, drawn as a dotted reference on every scan plot."""
-    return summarise(solve(make_geometry(WT_PARAMS)))
+def wt_metrics(spoke_pivot: bool = True) -> dict:
+    """Wild-type values, drawn as a dotted reference on every scan plot.
+
+    Follows the spoke-pivot setting so the reference is like-for-like.
+    """
+    return summarise(solve(make_geometry(WT_PARAMS), spoke_pivot=spoke_pivot))
 
 
-@st.cache_data(show_spinner=False, max_entries=128)
-def thumbnail(p: tuple, register_shift: bool = False) -> bytes:
-    """Small cross-section render for the scan strip. Never searches registers
-    (25x the cost per point would make a scan unusable)."""
-    sol = solve(make_geometry(p))
-    fig, ax = plt.subplots(figsize=(3.1, 3.1))
-    draw(sol, ax=ax, title="")
-    ax.set_xlabel("")
+def _png(sol, size=7.2, dpi=140, title=None, bare=False) -> bytes:
+    fig, ax = plt.subplots(figsize=(size, size))
+    draw(sol, ax=ax, title=title)
+    if bare:
+        ax.set_xlabel("")
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=95, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     return buf.getvalue()
 
 
+@st.cache_data(show_spinner=False, max_entries=128)
+def thumbnail(p: tuple, spoke_pivot: bool = True) -> bytes:
+    """Small cross-section render for the scan strip.
+
+    Never searches registers: 25x the cost per point would make a scan
+    unusable, so the strip always shows the wild-type register.
+    """
+    return _png(solve(make_geometry(p), spoke_pivot=spoke_pivot),
+                size=3.1, dpi=95, title="", bare=True)
+
+
 @st.cache_data(show_spinner=False, max_entries=256)
-def run_one(p: tuple, register_shift: bool):
-    """Solve one configuration. Returns (metrics, report, PNG, register scan)."""
-    sol = solve(make_geometry(p), register_shift=register_shift)
-    fig, ax = plt.subplots(figsize=(7.2, 7.2))
-    draw(sol, ax=ax)
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight")
-    plt.close(fig)
-    return summarise(sol), sol.report(), buf.getvalue(), list(sol.register_scan)
+def run_one(p: tuple, register_shift: bool, spoke_pivot: bool = True):
+    """Solve one configuration.
+
+    Returns (metrics, report, PNG, register scan rows, top-3 candidate PNGs).
+    The scan rows carry no solution objects, so the result stays cacheable.
+    """
+    sol = solve(make_geometry(p), register_shift=register_shift,
+                spoke_pivot=spoke_pivot)
+    rows = [{k: v for k, v in r.items() if k != "sol"} for r in sol.register_scan]
+    best = best_registers(sol, TOP_N, feasible_only=True)
+    top = [(r, _png(register_solution(sol, r["linkA"], r["linkC"]),
+                    size=3.4, dpi=100, title="", bare=True)) for r in best]
+    return summarise(sol), sol.report(), _png(sol), rows, top
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def run_scan(param: str, values: tuple, p: tuple, register_shift: bool):
+def run_scan(param: str, values: tuple, p: tuple, spoke_pivot: bool = True):
     base = make_geometry(p)
     rows = []
     bar = st.progress(0.0, text=f"Solving {len(values)} configurations…")
     for i, v in enumerate(values):
         g = set_param(base, param, v)
         rec = {param: v}
-        rec.update(summarise(solve(g)))
+        rec.update(summarise(solve(g, spoke_pivot=spoke_pivot)))
         rows.append(rec)
         bar.progress((i + 1) / len(values), text=f"Solved {i+1} of {len(values)}")
     bar.empty()
@@ -125,7 +143,7 @@ def run_scan(param: str, values: tuple, p: tuple, register_shift: bool):
 
 @st.cache_data(show_spinner=False, max_entries=16)
 def run_grid(px: str, xvals: tuple, py: str, yvals: tuple, p: tuple,
-             register_shift: bool = False):
+             spoke_pivot: bool = True):
     """Cross any two parameters and tabulate every metric for each cell."""
     base = make_geometry(p)
     rows = []
@@ -136,7 +154,7 @@ def run_grid(px: str, xvals: tuple, py: str, yvals: tuple, p: tuple,
         for xv in xvals:
             g = set_param(set_param(base, py, yv), px, xv)
             rec = {px: xv, py: yv}
-            rec.update(summarise(solve(g)))
+            rec.update(summarise(solve(g, spoke_pivot=spoke_pivot)))
             rows.append(rec)
             k += 1
             bar.progress(k / total, text=f"Solved {k} of {total}")
@@ -158,6 +176,7 @@ GRID_METRICS = {
     "A-C linker clearance (nm)": "linker_clear_nm",
     "Triplet base clearance (nm)": "base_clear_nm",
     "SAS-6 spoke clearance (nm)": "spoke_clear_nm",
+    "Worst contact approach (cos)": "worst_approach",
     **{f"Joint rotation — {j} (deg)": f"{j}_deg" for j in JOINTS},
     **{f"Bond load — {b}": f"bond_{b}" for b in BONDS},
     **{f"Buckling — {b} (%)": f"buckle_{b}_pct" for b in BUCKLE},
@@ -206,6 +225,20 @@ def family(df, px, py, col, title, ylabel, wt=None):
     return fig
 
 
+def _range_kw(is_int, lo_lim, hi_lim, value, **extra):
+    """number_input arguments for a scan endpoint.
+
+    Streamlit picks the widget's type from the arguments, so a whole-number
+    parameter has to be given ints throughout -- passing floats with
+    `format="%d"` renders fine but warns on every rerun.
+    """
+    cast = int if is_int else float
+    kw = dict(min_value=cast(lo_lim), max_value=cast(hi_lim), value=cast(value),
+              step=cast(1) if is_int else 0.5, format="%d" if is_int else "%.2f")
+    kw.update(extra)
+    return kw
+
+
 def axis_values(param, lo, hi, n):
     label, is_int, _, _ = SCANNABLE[param]
     if is_int:
@@ -240,6 +273,65 @@ def line_panel(df, xcol, xlabel, series, ylabel, title, wt=None):
         ax.legend(handles, labels, fontsize=8)
     fig.tight_layout()
     return fig
+
+
+REG_COLS = {"linkA": "linker-A (pf)", "linkC": "linker-C (pf)",
+            "cost": "model cost", "outer": "outer Ø (nm)",
+            "a_ring": "A ring (nm)", "lumen": "lumen (nm)",
+            "tilt": "triplet tilt (°)", "joint_rms": "joint RMS (°)",
+            "worst_band": "worst grade", "worst_gap": "worst gap (nm)",
+            "strand_clear": "strand clearance (nm)", "approach": "approach (cos)",
+            "feasible": "feasible", "reachable": "reachable",
+            "n_clashes": "MT clashes", "converged": "converged"}
+
+
+def register_panel(scan: list, top: list):
+    """The protofilament-register shortlist, with every caveat attached."""
+    st.subheader("Protofilament register — best candidates")
+    if not scan:
+        st.info("Register search returned no candidates.")
+        return
+
+    n_ok = sum(1 for r in scan if r["feasible"])
+    st.warning(
+        f"**Read this before using the ranking.** {n_ok} of {len(scan)} registers "
+        "are geometrically possible; the rest are listed but excluded, because they "
+        "need a strand to reach its protofilament *through* a microtubule wall or "
+        "leave it buried in one. Among the possible ones the ordering is by **model "
+        "cost**, which is built from joint tolerances and bond strengths that were "
+        "**reasoned, not measured**. Cost ranking is therefore a shortlist, **not "
+        "evidence** — compare the diameter and tilt columns against your own "
+        "measurement and treat the register as a hypothesis to test by cryo-ET.")
+
+    if not top:
+        st.error("No register is geometrically possible at these settings. Every "
+                 "candidate buries a strand in a microtubule. The perturbation may "
+                 "be too large for the linker to span at any register.")
+    for i, ((r, img), col) in enumerate(zip(top, st.columns(len(top) or 1))):
+        with col:
+            st.markdown(f"**#{i + 1} · linker-A {r['linkA']:+.0f} / "
+                        f"linker-C {r['linkC']:+.0f} pf**")
+            st.image(img, width='stretch')
+            d = r["outer"] - wt_metrics(st.session_state.get("spoke_pivot", True))["diameter_nm"]
+            st.metric("Outer Ø", f"{r['outer']:.1f} nm", delta=f"{d:+.1f} vs WT")
+            st.caption(
+                f"triplet tilt **{r['tilt']:+.2f}°** · joint RMS "
+                f"**{r['joint_rms']:.1f}°** (worst {r['worst_band']})  \n"
+                f"strand clearance **{r['strand_clear']:+.2f} nm** · approach "
+                f"**{r['approach']:+.2f}**  \n"
+                f"worst loop gap **{r['worst_gap']:.3f} nm** · model cost "
+                f"**{r['cost']:,.0f}**")
+
+    rdf = pd.DataFrame(scan).rename(columns=REG_COLS)
+    with st.expander(f"All {len(scan)} registers — possible ones first, then by cost"):
+        st.dataframe(rdf.round(3), width='stretch', height=320)
+        st.caption("`approach` is the cosine of the angle at which a strand meets "
+                   "its protofilament: +1 head-on from outside, 0 tangential, "
+                   "below 0 impossible. `strand clearance` is negative when a "
+                   "strand is inside a tubule wall, counting its own thickness.")
+    st.download_button("Download register scan (CSV)",
+                       rdf.to_csv(index=False).encode(),
+                       file_name="register_scan.csv", mime="text/csv")
 
 
 # --------------------------------------------------------------------------
@@ -282,13 +374,26 @@ with st.sidebar:
                              value=int(DEFAULTS.n_pf["A"]), step=1,
                              help="Also sets the tubule radius: R = n · 5.747 / 2π nm.")
 
+    st.subheader("Assumptions")
+    spoke_pivot = not st.checkbox(
+        "Spoke cannot bend at the SAS-6 head", key="lock_spoke", value=False,
+        help="Hold every SAS-6 coiled coil along the radius through its own "
+             "head, so it can only strain outwards — the assumption most "
+             "treatments of the cartwheel make. Leave unticked to let the "
+             "spoke hinge at the head, which is what the model does by "
+             "default. Wild type barely notices; a mismatched cartwheel "
+             "changes a great deal, because a spoke that cannot swing to "
+             "reach its triplet has to buckle instead.")
+
     register_shift = st.checkbox(
         "Search protofilament registers", key="register_shift", value=False,
         help="Slide both A-C linker contacts over +-2 protofilaments (25 "
-             "combinations) and rank them. SLOW: about 4 minutes, versus ~1 s "
-             "without. Applies to the Cross-section tab only — a scan or grid "
-             "would multiply by 25. Read the whole ranking, not just the "
-             "winner: the cheapest register is not necessarily the right one.")
+             "combinations) and show the best three that are geometrically "
+             "possible. SLOW: about 5 minutes, versus ~1 s without. Applies to "
+             "the Cross-section tab only — a scan or grid would multiply by 25. "
+             "Registers needing a strand to reach its site through a microtubule "
+             "are excluded; the rest are ranked by model cost, which is a "
+             "shortlist and not evidence.")
 
     def _reset_to_wt():
         # Must run as an on_click callback: it fires BEFORE the script re-runs,
@@ -297,7 +402,7 @@ with st.sidebar:
         # the page was manually refreshed.
         for k in ("N_cw", "N_mt", "MTn", "spoke_rod", "base_length", "pinhead_span",
                   "linker_length", "head_contact", "n_pf_A", "register_shift",
-                  "scan_done", "grid_done"):
+                  "lock_spoke", "scan_done", "grid_done"):
             st.session_state.pop(k, None)
 
     st.button("Reset to wild type", width='stretch', on_click=_reset_to_wt)
@@ -310,8 +415,10 @@ tab_x, tab_scan, tab_grid, tab_help = st.tabs(
 
 # ---------------------------------------------------------------- cross-section
 with tab_x:
-    with st.spinner("Solving…"):
-        m, report, png, reg_scan = run_one(PARAMS, register_shift)
+    spin = ("Searching 25 protofilament registers — about 5 minutes…"
+            if register_shift else "Solving…")
+    with st.spinner(spin):
+        m, report, png, reg_scan, reg_top = run_one(PARAMS, register_shift, spoke_pivot)
 
     if not m["converged"]:
         st.warning("The solver did not fully converge at these values — the geometry "
@@ -323,7 +430,7 @@ with tab_x:
         st.subheader("Size")
         c = st.columns(3)
         c[0].metric("Outer Ø", f"{m['diameter_nm']:.0f} nm",
-                    delta=f"{m['diameter_nm'] - 254.99:+.0f} vs WT")
+                    delta=f"{m['diameter_nm'] - wt_metrics(spoke_pivot)['diameter_nm']:+.0f} vs WT")
         c[1].metric("A ring", f"{m['A_ring_nm']:.0f} nm")
         c[2].metric("Lumen", f"{m['lumen_nm']:.0f} nm")
 
@@ -337,42 +444,43 @@ with tab_x:
                                             "from wild type, against its own limits.")
         st.markdown(" ".join(badge(j, m[f"{j}_band"]) for j in JOINTS),
                     unsafe_allow_html=True)
+        if not spoke_pivot:
+            st.caption("**Spoke locked:** each SAS-6 coiled coil is held on its own "
+                       "radius, so the `spoke` grade below is 0° by construction, "
+                       "not by relaxation. Strain it would have absorbed shows up in "
+                       "the other joints, in buckling, and in the loop gaps.")
         st.caption("These are **assumed tolerances, not verdicts on feasibility** — "
                    "the limits were reasoned rather than measured, and structures are "
                    "known to assemble in conditions graded SEVERE. Read them as "
                    "*how far from wild type*, and judge from the geometry and numbers.")
 
         st.subheader("Integrity")
-        c = st.columns(2)
+        c = st.columns(3)
         c[0].metric("MT clashes", m["n_clashes"],
                     delta="impossible" if m["n_clashes"] else "none",
                     delta_color="inverse" if m["n_clashes"] else "off")
         c[1].metric("Unattached", m["n_unattached"])
+        reach = m.get("reachable")
+        c[2].metric("Contacts", "reachable" if reach else "UNREACHABLE",
+                    delta=None if m.get("worst_approach") is None
+                    else f"cos {m['worst_approach']:+.2f}",
+                    delta_color="off" if reach else "inverse",
+                    help="How squarely each strand meets the protofilament it "
+                         "binds. +1 is head-on from outside the tubule, 0 a "
+                         "tangential graze; below 0 the strand would have to "
+                         "arrive through the wall, which nothing real can do.")
 
         st.markdown(f"Closest to rupture: **{m['worst_bond']}** "
                     f"(load {m['worst_bond_force']:.3f})")
         st.caption(f"Clearance vs microtubules — linker {m['linker_clear_nm']} nm, "
                    f"base {m['base_clear_nm']} nm, spoke {m['spoke_clear_nm']} nm. "
-                   f"Negative means passing through one.")
+                   "Negative means the strand is inside a tubule wall; the "
+                   "strand's own thickness counts, and anything clashing is "
+                   "drawn in red.")
 
-        if register_shift and reg_scan:
-            best = reg_scan[0]
-            st.info(f"**Lowest-cost register:** linker-A {best['linkA']:+.0f} pf, "
-                    f"linker-C {best['linkC']:+.0f} pf \u2014 outer "
-                    f"{best['outer']:.1f} nm. Lowest cost is **not** evidence; "
-                    "compare the whole table below against your data.")
-            rdf = pd.DataFrame(reg_scan)
-            rdf = rdf.rename(columns={"linkA": "linker-A (pf)", "linkC": "linker-C (pf)",
-                                      "cost": "model cost", "outer": "outer \u00d8 (nm)",
-                                      "tilt": "triplet tilt (deg)",
-                                      "worst_gap": "worst gap (nm)"})
-            with st.expander(f"All {len(reg_scan)} registers, cheapest first", expanded=True):
-                st.dataframe(rdf.round(3), width='stretch', height=240)
-                st.caption("The register that best matches a measurement is often "
-                           "not the cheapest. Judge by the diameter and tilt columns "
-                           "against your own data.")
-        elif register_shift:
-            st.info("Register search returned no alternatives.")
+    if register_shift:
+        st.divider()
+        register_panel(reg_scan, reg_top)
 
     st.divider()
     a, b = st.columns(2)
@@ -399,12 +507,8 @@ with tab_scan:
     param = c[0].selectbox("Parameter to vary", list(SCANNABLE),
                            format_func=lambda k: SCANNABLE[k][0])
     label, is_int, lo_lim, hi_lim = SCANNABLE[param]
-    fmt = "%d" if is_int else "%.2f"
-    step = 1.0 if is_int else 0.5
-    lo = c[1].number_input("From", float(lo_lim), float(hi_lim), float(lo_lim),
-                           step=step, format=fmt)
-    hi = c[2].number_input("To", float(lo_lim), float(hi_lim), float(hi_lim),
-                           step=step, format=fmt)
+    lo = c[1].number_input("From", **_range_kw(is_int, lo_lim, hi_lim, lo_lim))
+    hi = c[2].number_input("To", **_range_kw(is_int, lo_lim, hi_lim, hi_lim))
     if is_int:
         # whole-number parameters step one at a time, so the count follows
         # from the range -- for symmetry that is one point per fold
@@ -421,8 +525,8 @@ with tab_scan:
             vals = list(range(int(round(lo)), int(round(hi)) + 1))
         else:
             vals = [round(float(v), 4) for v in np.linspace(lo, hi, n)]
-        df = run_scan(param, tuple(vals), PARAMS, register_shift)
-        wt = wt_metrics()
+        df = run_scan(param, tuple(vals), PARAMS, spoke_pivot)
+        wt = wt_metrics(spoke_pivot)
 
         bad = int((~df["converged"]).sum())
         msg = f"Solved {len(df)} configurations."
@@ -443,7 +547,7 @@ with tab_scan:
                 q = list(PARAMS)
                 for idx in PARAM_SLOTS[param]:
                     q[idx] = v
-                thumbs.append((v, thumbnail(tuple(q), register_shift)))
+                thumbs.append((v, thumbnail(tuple(q), spoke_pivot)))
         for row_start in range(0, len(thumbs), 4):
             cols = st.columns(4)
             for col, (v, png) in zip(cols, thumbs[row_start:row_start + 4]):
@@ -487,23 +591,15 @@ with tab_scan:
                               ("triplet_tilt_deg", "triplet tilt from radial")],
                              "degrees", "Overall strain and tilt", wt))
 
+        st.pyplot(line_panel(df, param, label,
+                             [("worst_approach", "worst contact approach (cos)")],
+                             "cos (below 0 = impossible)",
+                             "Can every contact still be reached?", wt))
+
         if register_shift:
-            st.pyplot(line_panel(df, param, label,
-                                 [("reg_pinhead_pf", "pinhead on A-tubule"),
-                                  ("reg_linkerC_pf", "linker on C-tubule")],
-                                 "protofilaments shifted",
-                                 "Protofilament register chosen"))
-            picked = df[(df["reg_pinhead_pf"] != 0) | (df["reg_linkerC_pf"] != 0)]
-            if len(picked):
-                st.caption(
-                    "Register shifted away from wild type at: "
-                    + ", ".join(f"{label.split('(')[0].strip()}={r[param]:g} "
-                                f"(pinhead {r['reg_pinhead_pf']:+.0f}, "
-                                f"linker {r['reg_linkerC_pf']:+.0f})"
-                                for _, r in picked.iterrows()))
-            else:
-                st.caption("No configuration preferred a shifted register — "
-                           "wild-type protofilaments were always lowest-strain.")
+            st.info("The register search runs on the **Cross-section** tab only. "
+                    "Every point here uses the wild-type register: searching 25 "
+                    "registers per point would make a scan take hours.")
 
         with st.expander("Table of all metrics"):
             st.dataframe(df, width='stretch', height=320)
@@ -519,12 +615,8 @@ with tab_grid:
     px = c[0].selectbox("First parameter (x axis)", list(SCANNABLE), index=0,
                         format_func=lambda k: SCANNABLE[k][0], key="gx_param")
     xlab, x_int, xlo_l, xhi_l = SCANNABLE[px]
-    xlo = c[1].number_input("From", float(xlo_l), float(xhi_l), float(xlo_l),
-                            step=1.0 if x_int else 0.5,
-                            format="%d" if x_int else "%.2f", key="gx_lo")
-    xhi = c[2].number_input("To", float(xlo_l), float(xhi_l), float(xhi_l),
-                            step=1.0 if x_int else 0.5,
-                            format="%d" if x_int else "%.2f", key="gx_hi")
+    xlo = c[1].number_input("From", **_range_kw(x_int, xlo_l, xhi_l, xlo_l, key="gx_lo"))
+    xhi = c[2].number_input("To", **_range_kw(x_int, xlo_l, xhi_l, xhi_l, key="gx_hi"))
     if x_int:
         nx = max(int(round(xhi)) - int(round(xlo)) + 1, 1)
         c[3].number_input("Steps", value=nx, disabled=True, key="gx_n_ro")
@@ -538,12 +630,8 @@ with tab_grid:
                         index=others.index(default_y),
                         format_func=lambda k: SCANNABLE[k][0], key="gy_param")
     ylab, y_int, ylo_l, yhi_l = SCANNABLE[py]
-    ylo = c[1].number_input("From", float(ylo_l), float(yhi_l), float(ylo_l),
-                            step=1.0 if y_int else 0.5,
-                            format="%d" if y_int else "%.2f", key="gy_lo")
-    yhi = c[2].number_input("To", float(ylo_l), float(yhi_l), float(yhi_l),
-                            step=1.0 if y_int else 0.5,
-                            format="%d" if y_int else "%.2f", key="gy_hi")
+    ylo = c[1].number_input("From", **_range_kw(y_int, ylo_l, yhi_l, ylo_l, key="gy_lo"))
+    yhi = c[2].number_input("To", **_range_kw(y_int, ylo_l, yhi_l, yhi_l, key="gy_hi"))
     if y_int:
         ny = max(int(round(yhi)) - int(round(ylo)) + 1, 1)
         c[3].number_input("Steps", value=ny, disabled=True, key="gy_n_ro")
@@ -577,8 +665,8 @@ with tab_grid:
         if st.button("Run 2-parameter scan", type="primary", key="grid_go") \
                 or st.session_state.get("grid_done"):
             st.session_state["grid_done"] = True
-            gdf = run_grid(px, tuple(xv), py, tuple(yv), PARAMS, register_shift)
-            wt = wt_metrics()
+            gdf = run_grid(px, tuple(xv), py, tuple(yv), PARAMS, spoke_pivot)
+            wt = wt_metrics(spoke_pivot)
 
             bad = int((~gdf["converged"]).sum())
             (st.warning if bad else st.success)(
@@ -630,10 +718,15 @@ angle means very different things at a 45 nm spoke and a 13 nm linker arm.
 |---|---|
 | **OK** | comfortably accommodated |
 | **HARD** | strained but achievable; expect distortion |
-| **FORBIDDEN** | very costly; unlikely to form this way |
+| **SEVERE** | far from wild type; very costly under the model's assumed limits |
 
 Contacts on microtubules are tightest (they grip a rigid, ordered
 lattice); the triplet axis and base are most permissive.
+
+**SEVERE is not a verdict on feasibility.** The limits were reasoned, not
+measured, and real centrioles assemble in conditions this model grades
+SEVERE — a 28 nm SAS-6 spoke, for instance. Read the grades as *how far
+from wild type*.
 
 ### The other readouts
 
@@ -644,8 +737,48 @@ lattice); the triplet axis and base are most permissive.
 | **Bond load** | Which connection carries most strain, i.e. would break first. Bonds have different strengths, so weak ones yield first. |
 | **Buckling** | Segments forced to bow because space got tight. Nothing ever stretches. |
 | **MT clashes** | Microtubules overlapping in space. Anything above zero is physically impossible. |
-| **Strand clearance** | How close the linker, base or spoke passes to a microtubule. Negative means passing through one. |
+| **Strand clearance** | How close the linker, base or spoke passes to a microtubule, counting the strand's own thickness. Negative means it is inside a tubule wall, and it is drawn in red. |
+| **Contact approach** | The cosine of the angle at which a strand meets the protofilament it binds. +1 is head-on from outside the tubule, 0 a tangential graze, and below 0 the strand would have to arrive *through* the wall — impossible, however cheap the model makes it look. |
 | **Unattached triplets** | Triplets the cartwheel could not reach — expected when the two symmetries differ. |
+
+### Can the spoke bend at the head?
+
+By default the SAS-6 coiled coil may turn where it meets its head on the
+hub ring, and the `spoke` grade reports how far it turned. Ticking
+**Spoke cannot bend at the SAS-6 head** holds each spoke on the radius
+through its own head instead, so it can only strain outwards — the
+assumption most treatments of the cartwheel make.
+
+Wild type barely notices: the diameter is unchanged at 255 nm and overall
+strain moves from 1.4° to 1.6°, because a wild-type spoke hardly pivots
+anyway. A *mismatched* cartwheel changes completely. With 8 spokes on 9
+triplets the free spoke swings −20.9° to reach its triplet; locked, it
+cannot, so it buckles 27.5% instead, the diameter opens from 256 to
+279 nm, and the loop closures start to gape.
+
+That contrast is the useful part. If a conclusion holds either way it does
+not depend on the assumption; if it flips, the assumption is doing the
+work and should be stated.
+
+With the spoke locked the `spoke` grade is 0° **by construction, not by
+relaxation** — read the other joints, the buckling, and the loop gaps to
+see where the strain went.
+
+### Protofilament register
+
+Ticking **Search protofilament registers** slides both A-C linker contacts
+over ±2 protofilaments (25 combinations, about five minutes) and shows the
+best three that are geometrically possible, each with its own
+cross-section and metrics.
+
+Two things to hold on to. First, registers that need a strand to reach its
+site through a microtubule are excluded outright — they are not cheaper
+answers, they are not answers. Second, the surviving ones are ordered by
+**model cost**, which is assembled from tolerances and bond strengths that
+were reasoned rather than measured. **The cheapest register is not the most
+likely one.** Compare the diameter and tilt columns against your own
+measurement, and treat the result as a hypothesis for cryo-ET rather than
+a finding.
 
 ### Worth knowing
 
