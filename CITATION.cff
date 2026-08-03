@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+title: "CenGeometry: a geometric and mechanical model of the centriole cross-section"
+message: "If you use this tool or its results, please cite it as below."
+type: software
+authors:
+  - family-names: Hatzopoulos
+    given-names: Georgios
+    affiliation: UPGON
+repository-code: "https://github.com/UPGON/CenGeometry"
+abstract: >-
+  A geometric and mechanical model of the centriole cross-section. One
+  repeating unit is represented as rigid bodies joined by connections that
+  can rotate; because the units must close into a ring, the model solves for
+  the least-strained arrangement that still fits together. It predicts how
+  structural perturbations -- SAS-6 mutations that change cartwheel symmetry,
+  altered coiled-coil lengths, loss of the C-tubule -- change the architecture
+  of the whole organelle. Every dimension is measured from a cryo-ET-derived
+  schematic by a re-runnable calibration script.
+keywords:
+  - centriole
+  - cartwheel
+  - SAS-6
+  - microtubule triplet
+  - A-C linker
+  - structural modelling
+  - cryo-ET
+references:
+  - type: software
+    title: "centriole.m: parametric centriole cross-section (original MATLAB script)"
+    authors:
+      - family-names: Neves
+        given-names: Aitana
+    notes: >-
+      The original script this project grew from, kept in legacy/ for
+      provenance. Superseded by the Python model but its ancestor.

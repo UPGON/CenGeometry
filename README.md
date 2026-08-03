@@ -1,5 +1,7 @@
 # CenGeometry
 
+**Georgios Hatzopoulos** · UPGON
+
 A geometric and mechanical model of the centriole cross-section, built to
 predict how structural perturbations — SAS-6 mutations that change
 cartwheel symmetry, altered coiled-coil lengths, loss of the C-tubule —
@@ -353,6 +355,18 @@ without re-deriving anything:
 `legacy/` holds the original MATLAB `centriole.m` written by Aitana Neves,
 which this project grew from, plus two intermediate Python models. They are
 superseded by `centriole_kinematic.py` and kept only for provenance.
+
+---
+
+## Authorship and citation
+
+Written by **Georgios Hatzopoulos** (UPGON). The model, its calibration and
+this implementation are his; `legacy/centriole.m`, the parametric MATLAB
+script the project grew from, was written by **Aitana Neves**.
+
+If you use the tool or its results, please cite it — GitHub's *Cite this
+repository* button reads [`CITATION.cff`](CITATION.cff) and will give you a
+formatted reference.
 
 ---
 
